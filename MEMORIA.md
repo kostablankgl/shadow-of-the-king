@@ -1,0 +1,12 @@
+# Memoria del proyecto
+
+- 2026-11-07: El usuario decide rehacer «Эхо слепого» como juego nuevo en 3D con Godot 4, en vez de seguir el prototipo 2D HTML. Estilo low-poly y cámara en tercera persona (propuesta pendiente de confirmar). Render `gl_compatibility` por ser móvil de gama media.
+- 2026-11-07: Material de partida en `adjuntos/`: `shadowofking.html` (prototipo 2D completo, Canvas 2D), `v1.1.md` (notas de tecnología) y `90345400_...pdf` (TZ de arte y animaciones del guerrero ciego). El proyecto Godot estaba vacío: `main.tscn` solo tenía un Label.
+- 2026-11-07: Plataforma objetivo: tablet Android en horizontal. `project.godot` con base 1280x800, `stretch/mode=canvas_items`, `aspect=expand` y orientación sensor-landscape (4).
+- 2026-11-07: M0 hecho: `main.tscn` (Node3D), `main.gd` construye la sala de prueba, `player.tscn`/`player.gd` (CharacterBody3D en tercera persona con SpringArm) y `touch_controls.tscn`/`touch_controls.gd` (joystick izquierdo, arrastre derecho para cámara, botones JUMP/ECHO/CROUCH). ECHO aún no hace nada.
+- 2026-11-07: La compilación falla si Godot no está instalado: `build` responde «Godot is missing». Instalarlo desde Ágora → Programming → Godot (≈700 MB con JDK). En modo Revisar `falta godot` solo se lo propone al usuario.
+- 2026-11-07: Godot 4.7.2 ya está instalado. Validar sin pantalla: `godot --headless --path . --editor --quit` (importa) y `godot --headless --path . --quit-after 10` (carga la escena). M0 compila y arranca sin errores.
+- 2026-11-07: El chequeo de salud del Taller no ve cámaras creadas por código: exige una Camera3D dentro del árbol de `main.tscn`. Por eso Player y TouchControls van como instancias en `main.tscn` y `main.gd` solo construye la sala. APK exportado y firmado en `juego.apk` (26,5 MB).
+- 2026-11-07: M1: `echo_system.gd` lanza 360 rayos en esfera (Fibonacci), coloca marcadores aditivos billboard (`echo_marker.gdshader`) con onda de 22 m/s y desvanecido; `player.gd` dispara el eco con cooldown de 1,1 s. El mundo queda casi negro y el jugador tiene una emisión tenue para no perderse.
+- 2026-11-07: El usuario prefiere exportar desde Godot en su tablet; no generar APK salvo que lo pida.
+- 2026-11-07: M1.1: reveal sólido con `reveal.gdshader` (onda de 18 m/s, memoria de 10 s) y mapa de visibilidad equirectangular 64x32 desde 720 rayos. `main.gd` comparte un ShaderMaterial en toda la sala; `echo_system.gd` actualiza `echo_origin`, `echo_age` y `visibility_map`. Se eliminaron los marcadores de puntos.

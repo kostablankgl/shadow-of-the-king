@@ -1,0 +1,1499 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Эхо слепого</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none}
+canvas{display:block}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+// Игра «ЭХО СЛЕПОГО», майлстоун M3 (стражи со слухом, шум героя, камни, жизни). Модули разделены строками «ФАЙЛ».
+
+// ФАЙЛ: js/data.js — все числа баланса (ТЗ 6.2, 12.2)
+const CONFIG = {
+  W: 1280, H: 720, TILE: 64, STEP: 1 / 60, maxFrame: 0.25, maxPixelRatio: 2,
+  player: {
+    bodyW: 24, bodyH: 128, gravity: 1800, runSpeed: 320, walkSpeed: 160,
+    jumpVel: -502,   /* подъём ≈ 70 px: v² / (2·gravity); было -700 (136 px) */ coyote: 0.10, jumpBuffer: 0.12, accelGround: 2400,
+    accelAir: 1200, brake: 2800, maxFall: 1100, walkThreshold: 0.6, respawnBelow: 300
+  },
+  touch: {
+    stickR: 64, dead: 12, hitPad: 16, alpha: 0.45, alphaDown: 0.8,
+    vibrate: true, vibrateMs: 10, jump: { x: 1180, y: 620, d: 96 }
+  }
+};
+CONFIG.cloak = { n: 6, seg: 13, damp: 0.85, spring: 0.004, gravity: 800, backX: 4, iter: 3 };
+CONFIG.touch.echo = { x: 1180, y: 500, d: 80 };
+// Эхо (ТЗ 7): кулдаун, волна, проявление. snapDelay — через сколько после нажатия кадр «щелчок» и старт волны
+CONFIG.echo = { cooldown: 2.0, speed: 800, maxR: 640, thick: 24, fade: 0.3, tol: 48, revealTime: 2.5, size: 700,
+  snapDelay: 0.2, clickTime: 0.5, slowMul: 0.6, slowTime: 0.4, originY: 70, ringAlpha: 0.9 };
+// Страж-заглушка M2 (полный ListenerGuard — M3)
+CONFIG.enemy = { bodyW: 24, bodyH: 128, patrolSpeed: 100, investigateSpeed: 140, chaseSpeed: 260, arrive: 12, listenTime: 1.5,
+  searchTime: 4, searchSpread: 150, hearMin: 0.25, chaseIntensity: 0.7, chaseRadius: 200, lostTime: 2.5, sightR: 260, sightHalf: 0.5236,
+  attackDist: 48, telegraph: 0.45, hitR: 56, recover: 0.6, stepEvery: 0.4, chaseStepEvery: 0.25, passiveR: 96, passiveAlpha: 0.25 };
+// Герой: жизни, урон (ТЗ 6.4); камни; порог бега для шума шагов
+CONFIG.hero = { hp: 3, hurtTime: 0.4, invuln: 1.0, blinkHz: 8, knock: 260, deathTime: 1.5 };
+CONFIG.stone = { count: 8, gravity: 1400, speed: 560, maxSpeed: 860, aimR: 80, tap: 14, tapAngle: 0.9, cooldown: 0.35 };
+CONFIG.noise = { runVx: 240 };
+CONFIG.enemy.detailAlpha = 0.45;
+// rayW — ширина «цели» для лучей эха; hitSpread/hitGrow — как далеко и как быстро от точки касания проступает тело стража
+Object.assign(CONFIG.enemy, { rayW: 40, hitSpread: 46, hitGrow: 260 });   // насколько проступают детали стража рядом с героем
+// M3.1. blind.geo — подсказка геометрии (только для DEV). cane — «трость»: шаг слабо обводит пол у ступней
+CONFIG.blind = { geo: false };
+CONFIG.cane = { radius: 70, rays: 24, alpha: 0.5, crouchK: 0.6 };
+// Звук: стена режет громкость вдвое; до героя рисуется только пучок лучей от источника (ширина pathWidth на дистанции героя)
+CONFIG.sound = { wall: 0.5, heroMin: 0.04, pathRays: 28, pathMinHalf: 0.1, pathMaxHalf: 0.6, pathWidth: 80, pathSkin: 40, hearTime: 1.0, panDist: 300 };
+// Присед: стик вниз. speed — скорость, noiseR/noiseI — множители шума шагов, hear — во сколько раз слышно дальше
+CONFIG.crouch = { speed: 80, bodyH: 96, pull: 36, noiseR: 0.4, noiseI: 0.5, hear: 1.6, hearStill: 2.0, stillTime: 1.0, hearEase: 4, passiveR: 160, cy: -46 };
+CONFIG.crouchBody = Object.assign({}, CONFIG.player, { bodyH: CONFIG.crouch.bodyH });
+CONFIG.touch.throw = { x: 1180, y: 380, d: 80 };
+CONFIG.mark = { pool: 16, life: 0.8, r: 80, span: 0.45, yellowAt: 0.6 };
+// Лучевое эхо (M2.1): rays — лучей в волне, reflEvery — каждый какой луч отражается, reflR — дальность отражения
+Object.assign(CONFIG.echo, { rays: 240, rayStep: 4, reflEvery: 2, reflR: 320, reflStrength: 0.6, soundRays: 72, soundTime: 0.5, soundAlpha: 0.6 });
+// Палитра проявления (ТЗ 7.4)
+CONFIG.palette = { terrain: ["#3a7bff", "#2fe0f0", "#a45cff"], interactive: "#3df07a", danger: "#ff9a2e", enemy: "#ff3b3b" };
+// Шумы (ТЗ 8.3, приложение A). У врага every_sec вместо every_frames: у него пока нет покадровой анимации
+const SOUNDS = {
+  player: {
+    step_walk: { radius: 120, intensity: 0.3, sfx: "step_walk", every_frames: 10 },
+    step_run: { radius: 300, intensity: 0.7, sfx: "step_run", every_frames: 5 },
+    jump: { radius: 150, intensity: 0.4, sfx: "jump" }, land: { radius: 250, intensity: 0.6, sfx: "land" },
+    stone: { radius: 300, intensity: 0.8, sfx: "stone" },
+    echo: { radius: 700, intensity: 1.0, sfx: "click_snap" }, swing: { radius: 200, intensity: 0.5, sfx: "swing" }, clash: { radius: 250, intensity: 0.7, sfx: "clash" },
+    bells_stand: { radius: 80, intensity: 0.2, sfx: "bell_tier1", every_sec: 1.2 },
+    bells_walk: { radius: 150, intensity: 0.3, sfx: "bell_tier2", every_sec: 0.6 },
+    bells_run: { radius: 250, intensity: 0.6, sfx: "bell_tier3", every_sec: 0.35 }
+  },
+  enemy: {
+    step: { radius: 200, intensity: 0.5, sfx: "enemy_step", every_sec: 0.4 },
+    swing: { radius: 300, intensity: 0.8, sfx: "enemy_swing" }, land: { radius: 280, intensity: 0.7, sfx: "enemy_land" },
+    hm: { radius: 350, intensity: 0.5, sfx: "enemy_hm" }, shout: { radius: 500, intensity: 0.9, sfx: "enemy_shout" }
+  }
+};
+CONFIG.camera = { smooth: 8, dzX: 40, dzY: 60, look: 64, shake: true, shakeAmp: 4, shakeTime: 0.2 };
+CONFIG.anim = { landMinAir: 0.25, landTime: 0.42, fwdJumpSpeed: 150, runAnimMin: 0.5 };
+// Таблица анимаций листа base (ТЗ 5.3). start — с какого кадра начинать в игре
+const ANIMS = {
+  idle: { frames: 6, fps: 8, loop: true },
+  run: { frames: 10, fps: 14, loop: true },
+  jump_up: { frames: 6, fps: 12, loop: false, start: 1 },
+  jump_forward: { frames: 10, fps: 14, loop: false, start: 2 },
+  fall_land: { frames: 7, fps: 12, loop: false },
+  echo_click: { frames: 5, fps: 10, loop: false },
+  listen: { frames: 2, fps: 4, loop: true },
+  hurt: { frames: 3, fps: 10, loop: false },
+  death: { frames: 8, fps: 8, loop: false },
+  crouch_idle: { frames: 6, fps: 8, loop: true },
+  crouch_walk: { frames: 8, fps: 11, loop: true },   // 77 px/с шага ≈ скорость приседа 80
+  guard_idle: { frames: 4, fps: 6, loop: true },
+  guard_walk: { frames: 8, fps: 9, loop: true },
+  guard_run: { frames: 10, fps: 14, loop: true },
+  guard_listen: { frames: 2, fps: 4, loop: true },
+  sword_draw: { frames: 7, fps: 10, loop: false },
+  combat_idle: { frames: 6, fps: 8, loop: true },
+  combat_run: { frames: 10, fps: 14, loop: true },
+  attack_slash: { frames: 10, fps: 15, loop: false, hold: { from: 4, to: 5, extra: 0.12 } },
+  parry: { frames: 5, fps: 12, loop: false },
+  pickup: { frames: 5, fps: 10, loop: false }
+};
+const W = CONFIG.W, H = CONFIG.H, TILE = CONFIG.TILE;
+
+// ФАЙЛ: js/bus.js — простая шина событий (замена сигналов Godot)
+const Bus = {
+  h: {},
+  on(n, f) { (this.h[n] || (this.h[n] = [])).push(f); },
+  emit(n, d) { (this.h[n] || []).forEach(f => f(d)); }
+};
+
+// ФАЙЛ: js/level.js — TestLevel: # стена, = платформа сверху, . пусто
+const Level = {
+  rows: [
+    "################################################################",
+    "#..............................................................#",
+    "#..............................................................#",
+    "#..............................................................#",
+    "#..............................................................#",
+    "#..............................................................#",
+    "#..............................................................#",
+    "#.................#########....................................#",
+    "#............##############...........................######...#",
+    "#........##################.........................########...#",
+    "#.....#####################...............##..#...##########...#",
+    "#############################..#################################"
+  ],
+  cols: 64, nrows: 12, start: { x: 128, y: 704 },
+  get(c, r) {
+    if (c < 0 || c >= this.cols || r < 0) return "#";
+    if (r >= this.nrows) return ".";
+    return this.rows[r][c];
+  },
+  h() { return this.nrows * TILE; },
+  // Сколько стен между двумя точками (подряд идущие твёрдые клетки = одна стена): звук через стену тише
+  walls(x0, y0, x1, y1) {
+    const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 8)); let c = 0, was = false;
+    for (let i = 0; i <= n; i++) {
+      const k = this.solidAt(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n);
+      if (k && !was) c++;
+      was = k;
+    }
+    return c;
+  },
+  solidAt(x, y) {
+    const c = Math.floor(x / TILE), r = Math.floor(y / TILE), t = this.get(c, r);
+    return t === "#" || (t === "=" && y - r * TILE < 12);
+  },
+  // Луч из (x, y): точный проход по клеткам сетки (DDA), углы не «проскакиваются». Грани: 0 верх, 1 право, 2 низ, 3 лево
+  cast(x, y, ux, uy, maxLen) {
+    const T = TILE; let c = Math.floor(x / T), r = Math.floor(y / T), t = 0, nx = 0, ny = 0;
+    const sx = ux > 0 ? 1 : -1, sy = uy > 0 ? 1 : -1, tdx = ux ? Math.abs(T / ux) : Infinity, tdy = uy ? Math.abs(T / uy) : Infinity;
+    let tx = ux ? (ux > 0 ? (c + 1) * T - x : x - c * T) / Math.abs(ux) : Infinity;
+    let ty = uy ? (uy > 0 ? (r + 1) * T - y : y - r * T) / Math.abs(uy) : Infinity;
+    for (let i = 0; i < 300; i++) {
+      if (tx < ty) { c += sx; t = tx; tx += tdx; nx = -sx; ny = 0; } else { r += sy; t = ty; ty += tdy; nx = 0; ny = -sy; }
+      if (t > maxLen) return null;
+      const k = this.get(c, r);
+      if (k === "#") return this.hitAt(x, y, ux, uy, t, c, r, nx, ny);
+      if (k === "=") {
+        const b = this.bar(x, y, ux, uy, c * T, r * T, c * T + T, r * T + 12);
+        if (b && b.t <= maxLen) return this.hitAt(x, y, ux, uy, b.t, c, r, b.nx, b.ny);
+      }
+    }
+    return null;
+  },
+  hitAt(x, y, ux, uy, t, c, r, nx, ny) {
+    const o = this.map.get(c * 100 + r);
+    if (!o) return null;
+    return { d: t, o, face: nx ? (nx > 0 ? 1 : 3) : (ny > 0 ? 2 : 0), nx, ny, x: x + ux * t + nx * 0.5, y: y + uy * t + ny * 0.5 };
+  },
+  // Вход луча в прямоугольник (тонкая платформа): расстояние и нормаль грани
+  bar(x, y, ux, uy, x0, y0, x1, y1) {
+    let tmin = -Infinity, tmax = Infinity, nx = 0, ny = 0;
+    if (ux !== 0) {
+      let a = (x0 - x) / ux, b = (x1 - x) / ux, n = -1;
+      if (a > b) { const q = a; a = b; b = q; n = 1; }
+      if (a > tmin) { tmin = a; nx = n; ny = 0; }
+      if (b < tmax) tmax = b;
+    } else if (x < x0 || x > x1) return null;
+    if (uy !== 0) {
+      let a = (y0 - y) / uy, b = (y1 - y) / uy, n = -1;
+      if (a > b) { const q = a; a = b; b = q; n = 1; }
+      if (a > tmin) { tmin = a; nx = 0; ny = n; }
+      if (b < tmax) tmax = b;
+    } else if (y < y0 || y > y1) return null;
+    return tmin <= tmax && tmin >= 0 ? { t: tmin, nx, ny } : null;
+  },
+  objs: [],
+  // Каждый непустой тайл — проявляемый объект (ТЗ 7.3); цвет по хешу имени, стабильный между запусками
+  init() {
+    this.objs = []; this.map = new Map();
+    for (let r = 0; r < this.nrows; r++) {
+      for (let c = 0; c < this.cols; c++) {
+        const t = this.rows[r][c];
+        if (t === ".") continue;
+        const name = "t" + c + "_" + r;
+        let h = 0;
+        for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+        this.objs.push({ name, c, r, type: t, x: c * TILE + 32, y: r * TILE + (t === "#" ? 32 : 6), reveal: 0, edge: [0, 0, 0, 0], snd: [0, 0, 0, 0],
+                         color: CONFIG.palette.terrain[h % 3] });
+      }
+    }
+    this.objs.forEach(o => this.map.set(o.c * 100 + o.r, o));   // тайлы не в реестре стражей: у больших уровней их сотни
+  }
+};
+
+// ФАЙЛ: js/input.js — сенсорное управление (ТЗ 12.2, 12.3)
+const cv = document.getElementById("c");
+const Input = {
+  axis: 0, jumpDown: false, jumpPressed: false, echoDown: false, echoPressed: false, aim: null, throwEvt: null, stick: null, ptr: new Map(),
+  toLogical(e) {
+    const r = cv.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height };
+  },
+  buzz() {
+    if (!CONFIG.touch.vibrate || !navigator.vibrate) return;
+    try { navigator.vibrate(CONFIG.touch.vibrateMs); } catch (_) {}
+  },
+  onDown(e) {
+    e.preventDefault();
+    const p = this.toLogical(e), T = CONFIG.touch, J = T.jump;
+    AudioManager.unlock();
+    if (Dev.tap(p)) return;
+    if (Math.hypot(p.x - J.x, p.y - J.y) <= J.d / 2 + T.hitPad) {
+      this.ptr.set(e.pointerId, "jump");
+      this.jumpDown = true; this.jumpPressed = true; this.buzz();
+    } else if (Math.hypot(p.x - T.echo.x, p.y - T.echo.y) <= T.echo.d / 2 + T.hitPad) {
+      this.ptr.set(e.pointerId, "echo");
+      this.echoDown = true; this.echoPressed = true; this.buzz();
+    } else if (Math.hypot(p.x - T.throw.x, p.y - T.throw.y) <= T.throw.d / 2 + T.hitPad) {
+      this.ptr.set(e.pointerId, "throw");
+      this.aim = { id: e.pointerId, ox: T.throw.x, oy: T.throw.y, x: p.x, y: p.y }; this.buzz();
+    } else if (p.x < W / 2 && !this.stick) {
+      this.ptr.set(e.pointerId, "stick");
+      this.stick = { id: e.pointerId, ox: p.x, oy: p.y, x: p.x, y: p.y };
+    }
+  },
+  onMove(e) {
+    const a = this.aim;
+    if (a && a.id === e.pointerId) { const q = this.toLogical(e); a.x = q.x; a.y = q.y; return; }
+    const s = this.stick;
+    if (!s || s.id !== e.pointerId) return;
+    const p = this.toLogical(e), T = CONFIG.touch, dx = p.x - s.ox;
+    s.x = p.x; s.y = p.y;
+    const dy = p.y - s.oy; s.crouch = dy > CONFIG.crouch.pull || (s.crouch && dy > CONFIG.crouch.pull * 0.6);
+    this.axis = Math.abs(dx) < T.dead ? 0 : Math.max(-1, Math.min(1, dx / T.stickR));
+  },
+  onUp(e) {
+    const role = this.ptr.get(e.pointerId);
+    if (role === "stick") { this.stick = null; this.axis = 0; }
+    if (role === "jump") this.jumpDown = false;
+    if (role === "echo") this.echoDown = false;
+    if (role === "throw" && this.aim) { this.throwEvt = { dx: this.aim.x - this.aim.ox, dy: this.aim.y - this.aim.oy }; this.aim = null; }
+    this.ptr.delete(e.pointerId);
+  },
+  takeJump() { const v = this.jumpPressed; this.jumpPressed = false; return v; },
+  takeEcho() { const v = this.echoPressed; this.echoPressed = false; return v; },
+  takeThrow() { const v = this.throwEvt; this.throwEvt = null; return v; },
+  crouchDown() { return !!(this.stick && this.stick.crouch); }
+};
+
+// ФАЙЛ: js/player.js — физика героя (ТЗ 6.2, 6.3)
+const Player = {
+  x: 0, y: 0, px: 0, py: 0, vx: 0, vy: 0, dir: 1,
+  ground: false, coyote: 0, buf: 0, state: "IDLE",
+  anim: "idle", animT: 0, animStart: 0, animKey: "", freeze: false,
+  echoT: 0, slowT: 0, snapped: false, ov: null, cy: -64,
+  airT: 0, landT: 0, jumped: false, jumpKind: "jump_up",
+  hp: 3, invuln: 0, hurtT: 0, deadT: 0, throwT: 0, stepF: -1, crouch: false, still: 0, hearK: 1,
+  reset() {
+    const s = Level.start;
+    Object.assign(this, { x: s.x, y: s.y, px: s.x, py: s.y, vx: 0, vy: 0, coyote: 0, buf: 0, ground: false, airT: 0, landT: 0, jumped: false, echoT: 0, slowT: 0, ov: null,
+      hp: CONFIG.hero.hp, invuln: 0, hurtT: 0, deadT: 0, throwT: 0, stepF: -1, crouch: false, still: 0, hearK: 1, cy: -64 });
+    Cloak.init(this.x, this.y - 90); Camera.snap();
+  },
+  update(dt) {
+    this.crouchStep(dt);
+    const C = this.crouch ? CONFIG.crouchBody : CONFIG.player;
+    this.px = this.x; this.py = this.y;
+    if (this.invuln > 0) this.invuln -= dt;
+    if (this.hurtT > 0) this.hurtT -= dt;
+    if (this.throwT > 0) this.throwT -= dt;
+    this.echo(dt);
+    this.moveInput(dt, C);
+    this.jump(dt, C);
+    this.vy = Math.min(this.vy + C.gravity * dt, C.maxFall);
+    const was = this.ground;
+    this.moveX(dt, C);
+    this.moveY(dt, C);
+    this.updateAnim(dt, was, C);
+    const an = Hero.anchor(this.anim, this.frame());
+    Cloak.step(dt, this.x + this.dir * an.x, this.y + an.y, this.dir);
+    if (this.y > Level.h() + C.respawnBelow || (this.hp <= 0 && (this.deadT -= dt) <= 0)) respawn();
+  },
+  // Присед: стик вниз. Тише шаги, слышно дальше; встать можно, только если над головой есть место
+  crouchStep(dt) {
+    const K = CONFIG.crouch, want = Input.crouchDown() && !this.locked();
+    if (want && this.ground) this.crouch = true;
+    else if (this.crouch && (!want || !this.ground) && this.canStand()) this.crouch = false;
+    this.cy = this.crouch ? K.cy : -64;
+    this.still = this.crouch && Math.abs(this.vx) < 5 ? this.still + dt : 0;
+    const target = !this.crouch ? 1 : (this.still >= K.stillTime ? K.hearStill : K.hear);
+    this.hearK += (target - this.hearK) * Math.min(1, dt * K.hearEase);
+  },
+  canStand() {
+    const hw = CONFIG.player.bodyW / 2, e = 0.01, T = TILE;
+    const c0 = Math.floor((this.x - hw + e) / T), c1 = Math.floor((this.x + hw - e) / T);
+    const r0 = Math.floor((this.y - CONFIG.player.bodyH + e) / T), r1 = Math.floor((this.y - CONFIG.crouch.bodyH - e) / T);
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) if (Level.get(c, r) === "#") return false;
+    return true;
+  },
+  // Слышит ли герой событие и насколько громко (с учётом приседа и стен)
+  hears(ev) { const k = ev.falloffAt({ x: this.x, y: this.y + this.cy }, this.hearK); return k >= CONFIG.sound.heroMin ? k : 0; },
+  locked() { return this.hp <= 0 || this.hurtT > 0; },
+  // Урон (ТЗ 6.4): HURT 0.4 с, неуязвимость 1 с, отброс от источника; 0 жизней — смерть и возрождение
+  hurt(src) {
+    const H = CONFIG.hero;
+    if (this.invuln > 0 || this.hp <= 0) return;
+    this.hp--; Camera.kick(); this.echoT = 0; this.slowT = 0; AudioManager.play("hurt", 1);
+    this.vx = (this.x >= src.x ? 1 : -1) * H.knock; this.vy = -200; this.ground = false;
+    if (this.hp <= 0) this.deadT = H.deathTime; else { this.hurtT = H.hurtTime; this.invuln = H.invuln; }
+  },
+  // Шум шагов (ТЗ 8.2): бег и присед — на кадрах 0 и середины цикла, шаг — на кадре 0. В приседе тише. Каждый шаг — «трость»
+  stepNoise(st) {
+    if (st !== "RUN" && st !== "CROUCH_WALK") { this.stepF = -1; return; }
+    const crouch = st === "CROUCH_WALK", f = this.frame(), run = !crouch && Math.abs(this.vx) > CONFIG.noise.runVx;
+    if (f !== this.stepF && (f === 0 || ((run || crouch) && f === ANIMS[this.anim].frames / 2))) {
+      const k = run ? "step_run" : "step_walk", ev = new SoundEvent(this, k, SOUNDS.player[k]);
+      if (crouch) { ev.radius *= CONFIG.crouch.noiseR; ev.intensity *= CONFIG.crouch.noiseI; }
+      AudioManager.emit(ev);
+      EchoManager.cane(this.x, this.y - 4, crouch ? CONFIG.cane.crouchK : 1);
+    }
+    this.stepF = f;
+  },
+  // Эхо-щелчок: из IDLE/RUN, не прерывает движение, скорость ×0.6 на 0.4 с (ТЗ 6.3, 7.1, 7.6)
+  echo(dt) {
+    const E = CONFIG.echo;
+    if (Input.takeEcho() && !this.locked() && this.ground && this.echoT <= 0 && EchoManager.ready()) {
+      EchoManager.cd = E.cooldown; this.echoT = E.clickTime; this.slowT = E.slowTime; this.snapped = false;
+    }
+    if (this.echoT <= 0) return;
+    this.echoT -= dt; this.slowT -= dt;
+    if (!this.snapped && E.clickTime - this.echoT >= E.snapDelay) {
+      this.snapped = true;
+      EchoManager.spawn(this.x, this.y - E.originY);
+      AudioManager.emit(new SoundEvent(this, "player_echo", SOUNDS.player.echo));
+    }
+  },
+  // Состояние героя и выбор анимации (ТЗ 6.3)
+  updateAnim(dt, was, C) {
+    const A = CONFIG.anim, moving = Math.abs(this.vx) > 5;
+    if (!was && this.ground) {
+      if (this.airT > A.landMinAir) { this.landT = A.landTime; AudioManager.emit(new SoundEvent(this, "land", SOUNDS.player.land)); EchoManager.cane(this.x, this.y - 4, 1.4); }
+      this.airT = 0; this.jumped = false;
+    }
+    if (!this.ground) this.airT += dt;
+    if (this.landT > 0) this.landT -= dt;
+    if (moving && this.ground) this.landT = 0;
+    let st = "IDLE";
+    if (!this.ground) st = this.vy < 0 ? "JUMP_UP" : "FALL";
+    else if (this.landT > 0) st = "LAND";
+    else if (moving) st = "RUN";
+    if (this.crouch && this.ground && st !== "LAND") st = moving ? "CROUCH_WALK" : "CROUCH";
+    this.ov = null;
+    if (this.hp <= 0) st = "DEATH"; else if (this.hurtT > 0) st = "HURT";
+    this.state = st;
+    if (this.echoT > 0 && this.ground) {   // ECHO_CLICK: руки и голова поверх бега/стойки
+      this.ov = { name: "echo_click", f: Math.min(4, Math.floor((CONFIG.echo.clickTime - this.echoT) * ANIMS.echo_click.fps)) };
+      if (st === "IDLE" || st === "RUN") this.state = "ECHO_CLICK";
+    }
+    if (this.throwT > 0 && !this.ov && st !== "DEATH" && st !== "HURT") this.ov = { name: "echo_click", f: 1 };   // бросок: рука у головы
+    if (st === "DEATH") this.setAnim("death", 0);
+    else if (st === "HURT") this.setAnim("hurt", 0);
+    else if (st === "CROUCH") this.setAnim("crouch_idle", 0);
+    else if (st === "CROUCH_WALK") this.setAnim("crouch_walk", 0);
+    else if (st === "RUN") this.setAnim("run", 0);
+    else if (st === "LAND") this.setAnim("fall_land", 2);
+    else if (st === "IDLE") this.setAnim("idle", 0);
+    else if (this.jumped) this.setAnim(this.jumpKind, ANIMS[this.jumpKind].start);
+    else this.setAnim("fall_land", 0);
+    this.freeze = !this.ground && !this.jumped && st !== "HURT" && st !== "DEATH";
+    this.animT += dt * (st === "RUN" ? Math.max(A.runAnimMin, Math.abs(this.vx) / C.runSpeed) : 1);
+    this.stepNoise(st);
+  },
+  setAnim(name, start) {
+    const key = name + start;
+    if (key !== this.animKey) { this.animKey = key; this.anim = name; this.animStart = start; this.animT = 0; }
+  },
+  frame() { return Hero.frameAt(this.anim, this.animT, this.animStart, this.freeze); },
+  // Разгон и торможение по стику: малое отклонение = шаг, большое = бег
+  moveInput(dt, C) {
+    const a = this.locked() ? 0 : Input.axis, m = Math.abs(a);
+    const slow = this.slowT > 0 ? CONFIG.echo.slowMul : 1;
+    const target = m === 0 ? 0 : Math.sign(a) * (this.crouch ? CONFIG.crouch.speed : (m < C.walkThreshold ? C.walkSpeed : C.runSpeed)) * slow;
+    if (m > 0) this.dir = Math.sign(a);
+    let rate = this.ground ? C.accelGround : C.accelAir;
+    if (target === 0 || (this.vx !== 0 && Math.sign(target) !== Math.sign(this.vx))) {
+      rate = this.ground ? C.brake : C.accelAir;
+    }
+    const d = target - this.vx, s = rate * dt;
+    this.vx = Math.abs(d) <= s ? target : this.vx + Math.sign(d) * s;
+  },
+  // Прыжок с «временем койота» и буфером нажатия
+  jump(dt, C) {
+    this.coyote = this.ground ? C.coyote : this.coyote - dt;
+    if (Input.takeJump() && !this.locked() && !this.crouch) this.buf = C.jumpBuffer; else this.buf -= dt;
+    if (this.buf > 0 && this.coyote > 0) {
+      this.vy = C.jumpVel; this.buf = 0; this.coyote = 0; this.ground = false;
+      this.jumped = true;
+      this.jumpKind = Math.abs(this.vx) > CONFIG.anim.fwdJumpSpeed ? "jump_forward" : "jump_up";
+      Bus.emit("jump", this);
+      AudioManager.emit(new SoundEvent(this, "jump", SOUNDS.player.jump));
+    }
+  },
+  moveX(dt, C) {
+    const hw = C.bodyW / 2, e = 0.01;
+    this.x += this.vx * dt;
+    if (this.vx === 0) return;
+    const r0 = Math.floor((this.y - C.bodyH + e) / TILE), r1 = Math.floor((this.y - e) / TILE);
+    const c = Math.floor((this.x + Math.sign(this.vx) * hw) / TILE);
+    for (let r = r0; r <= r1; r++) {
+      if (Level.get(c, r) === "#") {
+        this.x = this.vx > 0 ? c * TILE - hw : (c + 1) * TILE + hw;
+        this.vx = 0; break;
+      }
+    }
+  },
+  moveY(dt, C) {
+    const hw = C.bodyW / 2, e = 0.01, prev = this.y;
+    this.y += this.vy * dt; this.ground = false;
+    const c0 = Math.floor((this.x - hw + e) / TILE), c1 = Math.floor((this.x + hw - e) / TILE);
+    if (this.vy >= 0) {
+      const r = Math.floor(this.y / TILE);
+      for (let c = c0; c <= c1; c++) {
+        const t = Level.get(c, r);
+        if (t === "#" || (t === "=" && prev <= r * TILE + e)) {
+          this.y = r * TILE; this.vy = 0; this.ground = true; break;
+        }
+      }
+    } else {
+      const r = Math.floor((this.y - C.bodyH) / TILE);
+      for (let c = c0; c <= c1; c++) {
+        if (Level.get(c, r) === "#") { this.y = (r + 1) * TILE + C.bodyH; this.vy = 0; break; }
+      }
+    }
+  }
+};
+
+// ФАЙЛ: js/audio.js — SoundEvent и AudioManager: шина звуковых событий + синтез звуков (ТЗ 8, 13)
+class SoundEvent {
+  constructor(source, tag, d) {
+    this.source = source; this.tag = tag; this.radius = d.radius; this.intensity = d.intensity; this.sfx = d.sfx;
+    this.x = source.x; this.y = source.y + (source.cy || 0);   // точка, где прозвучало
+  }
+  // mul — во сколько раз слушатель слышит дальше (присед); каждая стена на пути режет громкость вдвое
+  falloffAt(p, mul = 1) {
+    const d = Math.hypot(p.x - this.x, p.y - this.y), R = this.radius * mul;
+    if (d >= R) return 0;
+    return Math.min(1, Math.max(0, this.intensity * (1 - d / R) * Math.pow(CONFIG.sound.wall, Level.walls(this.x, this.y, p.x, p.y))));
+  }
+}
+const AudioManager = {
+  ctx: null, nbuf: null, vol: 0.6, listeners: [],
+  // Браузер разрешает звук только после касания
+  unlock() {
+    try {
+      if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      if (this.ctx.state === "suspended") this.ctx.resume();
+    } catch (e) { this.ctx = null; }
+  },
+  emit(ev) {
+    const loud = ev.source === Player ? 1 : Player.hears(ev);
+    if (loud > 0) this.play(ev.sfx, loud, ev.source === Player ? 0 : Math.max(-1, Math.min(1, (ev.x - Player.x) / CONFIG.sound.panDist)));
+    this.listeners.forEach(f => f(ev));
+  },
+  // Выход со стерео: звук слышен слева или справа по стороне источника
+  out(c, node, pan) {
+    if (pan && c.createStereoPanner) { const p = c.createStereoPanner(); p.pan.value = pan; node.connect(p); p.connect(c.destination); }
+    else node.connect(c.destination);
+  },
+  tone(f0, f1, dur, vol, type, pan) {
+    const c = this.ctx; if (!c) return;
+    const o = c.createOscillator(), g = c.createGain(), t = c.currentTime;
+    o.type = type || "sine"; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+    g.gain.setValueAtTime(vol * this.vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); this.out(c, g, pan); o.start(t); o.stop(t + dur + 0.02);
+  },
+  noise(dur, vol, f0, f1, q, pan) {
+    const c = this.ctx; if (!c) return;
+    if (!this.nbuf) {
+      this.nbuf = c.createBuffer(1, c.sampleRate, c.sampleRate);
+      const d = this.nbuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    }
+    const s = c.createBufferSource(), f = c.createBiquadFilter(), g = c.createGain(), t = c.currentTime;
+    s.buffer = this.nbuf; s.loop = true; f.type = "bandpass"; f.Q.value = q || 1;
+    f.frequency.setValueAtTime(f0, t); f.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    g.gain.setValueAtTime(vol * this.vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(f); f.connect(g); this.out(c, g, pan); s.start(t); s.stop(t + dur + 0.02);
+  },
+  // k — громкость 0..1 (для чужих звуков зависит от расстояния)
+  play(name, k, pan) {
+    if (!this.ctx) return;
+    if (name === "click_snap") { this.noise(0.05, 0.9, 3500, 2500, 2); this.tone(1500, 300, 0.04, 0.3, "triangle"); }
+    else if (name === "echo_whoosh") this.noise(0.7, 0.35, 300, 2500, 0.8);
+    else if (name === "reveal_chime") { this.tone(880, 880, 0.35, 0.12); this.tone(1320, 1320, 0.3, 0.08); }
+    else if (name === "enemy_step") { this.tone(110, 60, 0.08, 0.5 * k, "sine", pan); this.noise(0.05, 0.15 * k, 400, 200, 1, pan); }
+    else if (name === "step_walk") this.noise(0.04, 0.12, 700, 400, 1);
+    else if (name === "step_run") { this.tone(130, 70, 0.07, 0.3, "sine"); this.noise(0.05, 0.2, 500, 250, 1); }
+    else if (name === "jump") this.noise(0.12, 0.2, 400, 900, 1);
+    else if (name === "land") { this.tone(100, 50, 0.12, 0.45, "sine"); this.noise(0.08, 0.25, 400, 150, 1); }
+    else if (name === "stone") { this.tone(900, 400, 0.05, 0.3 * k, "triangle", pan); this.noise(0.06, 0.3 * k, 2500, 1200, 2, pan); }
+    else if (name === "enemy_swing") this.noise(0.15, 0.3 * k, 800, 2500, 1, pan);
+    else if (name === "enemy_hm") { this.tone(190, 135, 0.3, 0.3 * k, "triangle", pan); this.tone(380, 270, 0.3, 0.1 * k, "sine", pan); }
+    else if (name === "enemy_shout") { this.tone(560, 300, 0.4, 0.4 * k, "sawtooth", pan); this.noise(0.3, 0.3 * k, 1400, 700, 1, pan); }
+    else if (name === "hurt") this.tone(220, 110, 0.18, 0.4, "sawtooth");
+  }
+};
+
+// ФАЙЛ: js/echo.js — EchoManager: кулдаун, лучевые волны (лидар) с отражением, реестр проявляемых объектов (ТЗ 7)
+const EchoManager = {
+  cd: 0, reg: [], live: new Set(), waves: [], swaves: [],
+  ready() { return this.cd <= 0; },
+  register(o) { if (this.reg.length < 256) this.reg.push(o); },
+  init() { AudioManager.listeners.push(ev => this.onSound(ev)); },
+  // Волна = набор лучей, посчитанных сразу; фронт «ползёт» по ним со скоростью волны
+  make(x, y, n, range, refl, aim, half) {
+    const E = CONFIG.echo, rays = [];
+    for (let i = 0; i < n; i++) {
+      const a = aim === undefined ? i / n * 6.2832 : aim - half + (n > 1 ? i / (n - 1) * 2 * half : 0), ux = Math.cos(a), uy = Math.sin(a), h = Level.cast(x, y, ux, uy, range);
+      rays.push({ ux, uy, h, hit: h ? h.d : range + 1, rf: null, grp: 0, done: false });
+    }
+    if (refl) this.reflect(rays, E);
+    return { on: true, x, y, r: 0, n, range, rays, total: range + (refl ? E.reflR : 0), fade: E.fade, chimed: false, sector: aim !== undefined };
+  },
+  // Каждый reflEvery-й луч, упёршийся в грань, даёт отражённый луч; лучи одной грани — один «кусок сферы»
+  reflect(rays, E) {
+    let grp = 0, prev = "";
+    rays.forEach((q, i) => {
+      if (!q.h) { prev = ""; return; }
+      const key = q.h.o.c + "," + q.h.o.r + "," + q.h.face;
+      if (key !== prev) { grp++; prev = key; }
+      q.grp = grp;
+      if (i % E.reflEvery) return;
+      const h = q.h, dot = q.ux * h.nx + q.uy * h.ny, ux = q.ux - 2 * dot * h.nx, uy = q.uy - 2 * dot * h.ny;
+      const c = Level.cast(h.x, h.y, ux, uy, E.reflR);
+      q.rf = { sx: h.x, sy: h.y, ux, uy, h: c, hit: c ? c.d : E.reflR + 1, done: false };
+    });
+  },
+  // Лучи волны против хитбокса стража: куда луч вошёл в тело раньше, чем в стену — там точка касания (в координатах стража)
+  entHits(w, skip) {
+    const B = CONFIG.enemy, out = [];
+    for (const o of this.reg) {
+      if (o.type !== undefined || o === skip) continue;
+      const bx0 = o.x - B.rayW / 2, bx1 = o.x + B.rayW / 2, by0 = o.y - B.bodyH, by1 = o.y;
+      for (const q of w.rays) {
+        let t0 = 0, t1 = w.range;
+        if (Math.abs(q.ux) < 1e-9) { if (w.x < bx0 || w.x > bx1) continue; }
+        else { const a = (bx0 - w.x) / q.ux, b = (bx1 - w.x) / q.ux; t0 = Math.max(t0, Math.min(a, b)); t1 = Math.min(t1, Math.max(a, b)); }
+        if (Math.abs(q.uy) < 1e-9) { if (w.y < by0 || w.y > by1) continue; }
+        else { const a = (by0 - w.y) / q.uy, b = (by1 - w.y) / q.uy; t0 = Math.max(t0, Math.min(a, b)); t1 = Math.min(t1, Math.max(a, b)); }
+        if (t0 > t1 || t0 > q.hit) continue;
+        out.push({ o, d: t0, lx: w.x + q.ux * t0 - o.x, ly: w.y + q.uy * t0 - o.y, done: false });
+      }
+    }
+    return out;
+  },
+  // Фронт дошёл до тела: проступает кусок вокруг точки касания (красный — эхо, белый — услышанный звук)
+  hitEnemy(s, w) {
+    const o = s.o, key = w.snd ? "hitsS" : "hitsE", arr = o[key] || (o[key] = []);
+    if (arr.length >= 48) arr.shift();
+    arr.push({ x: s.lx, y: s.ly, t: o.clock || 0 });
+    if (w.snd) o.hear = 1;
+    else { if (o.reveal <= 0 && !w.chimed) { w.chimed = true; AudioManager.play("reveal_chime", 1); } o.reveal = 1; }
+  },
+  push(list, w) { if (list.length >= 12) list.shift(); list.push(w); },
+  spawn(x, y) {
+    const w = this.make(x, y, CONFIG.echo.rays, CONFIG.echo.maxR, true);
+    w.ents = this.entHits(w); this.push(this.waves, w);
+    AudioManager.play("echo_whoosh", 1);
+  },
+  // Чужой звук, дошедший до героя: рисуется только пучок лучей от источника к герою и то, чего он коснулся по пути.
+  // Все лучи упёрлись в стену (волна не дошла) — не рисуем ничего. Стража на пути пучка слышно белым контуром.
+  onSound(ev) {
+    if (ev.source === Player || !Player.hears(ev)) return;
+    const S = CONFIG.sound, hx = Player.x, hy = Player.y + Player.cy, dx = hx - ev.x, dy = hy - ev.y, D = Math.hypot(dx, dy) || 1;
+    const aim = Math.atan2(dy, dx), half = Math.max(S.pathMinHalf, Math.min(S.pathMaxHalf, Math.atan2(S.pathWidth, D)));
+    const w = this.make(ev.x, ev.y, S.pathRays, D + S.pathSkin, false, aim, half);
+    if (!w.rays.some(q => q.hit >= D - 20)) return;
+    w.snd = true; w.ents = this.entHits(w, ev.source);
+    this.push(this.swaves, w);
+  },
+  // «Трость»: шаг героя слабо обводит пол у ступней (только картинка, шума нет)
+  cane(x, y, k) {
+    const C = CONFIG.cane, w = this.make(x, y, C.rays, C.radius * k, false);
+    w.snd = true; w.cane = C.alpha * Math.min(1, k); this.push(this.swaves, w);
+  },
+  update(dt) {
+    const E = CONFIG.echo, k = dt / E.revealTime, ks = dt / E.soundTime;
+    if (this.cd > 0) this.cd -= dt;
+    this.step(this.waves, dt, E); this.step(this.swaves, dt, E);
+    for (const o of this.reg) {
+      if (o.reveal > 0) o.reveal = Math.max(0, o.reveal - k);
+      if (o.hear > 0) o.hear = Math.max(0, o.hear - dt / CONFIG.sound.hearTime);
+    }
+    for (const o of this.live) {
+      if (o.reveal > 0) o.reveal = Math.max(0, o.reveal - k);
+      let any = o.reveal > 0;
+      for (let f = 0; f < 4; f++) { o.edge[f] = Math.max(0, o.edge[f] - k); o.snd[f] = Math.max(0, o.snd[f] - ks); any = any || o.edge[f] > 0 || o.snd[f] > 0; }
+      if (!any) this.live.delete(o);
+    }
+    Back.update(dt);
+  },
+  step(list, dt, E) {
+    for (const w of list) {
+      if (w.r < w.total) { w.r += E.speed * dt; this.advance(w, E); }
+      else if ((w.fade -= dt) <= 0) w.on = false;
+    }
+    for (let i = list.length - 1; i >= 0; i--) if (!list[i].on) list.splice(i, 1);
+  },
+  // Фронт дошёл до точки удара луча: грань и тайл проявляются; то же для отражённых лучей
+  advance(w, E) {
+    for (const q of w.rays) {
+      if (q.h && !q.done && w.r >= q.hit) { q.done = true; this.touch(q.h, 1, w); }
+      const f = q.rf;
+      if (f && f.h && !f.done && w.r - q.hit >= f.hit) { f.done = true; this.touch(f.h, E.reflStrength, w); }
+    }
+    if (w.ents) for (const s of w.ents) if (!s.done && w.r >= s.d) { s.done = true; this.hitEnemy(s, w); }
+    if (!w.snd && w.r < w.range) this.reveal(w, E);
+  },
+  touch(h, k, w) {
+    const o = h.o; this.live.add(o);
+    if (w.snd) { o.snd[h.face] = Math.max(o.snd[h.face], w.cane || CONFIG.echo.soundAlpha); return; }
+    o.reveal = Math.max(o.reveal, k); o.edge[h.face] = Math.max(o.edge[h.face], k);
+    if (!w.chimed) { w.chimed = true; AudioManager.play("reveal_chime", 1); }
+  },
+  // Враги и фон проявляются у фронта, но только если до них дошёл луч (стена закрывает)
+  reveal(w, E) {
+    const seen = (x, y) => {
+      const dx = x - w.x, dy = y - w.y, d = Math.hypot(dx, dy);
+      if (Math.abs(d - w.r) >= E.tol) return false;
+      let a = Math.atan2(dy, dx); if (a < 0) a += 6.2832;
+      const i = Math.round(a / 6.2832 * w.n) % w.n, R = w.rays;
+      return Math.max(R[i].hit, R[(i + 1) % w.n].hit, R[(i + w.n - 1) % w.n].hit) >= d - 10;
+    };
+    Back.hit(seen);
+  },
+  poly(g, pts, lw, col, open) {
+    const n = pts.length; let pen = false;
+    g.lineWidth = lw; g.strokeStyle = col; g.beginPath();
+    const last = open ? n - 1 : n;
+    for (let i = 0; i <= last; i++) {
+      const p = pts[i % n];
+      if (!p) { pen = false; continue; }
+      if (pen) g.lineTo(p.x, p.y); else { g.moveTo(p.x, p.y); pen = true; }
+    }
+    g.stroke();
+  },
+  draw(g) {
+    for (const w of this.waves) this.drawWave(g, w);
+    for (const w of this.swaves) this.drawWave(g, w);
+  },
+  drawWave(g, w) {
+    if (w.cane) return;
+    const E = CONFIG.echo, snd = w.snd, f = w.r < w.total ? 1 : Math.max(0, w.fade / E.fade);
+    const k = Math.max(0, 1 - w.r / (snd ? w.total * 1.4 : E.size)) * f * (snd ? 0.5 : 1);
+    const rgb = snd ? "255,255,255," : "140,217,255,";
+    g.lineCap = "round"; g.lineJoin = "round";
+    // фронт ломается там, где луч упёрся в стену
+    const pts = w.rays.map(q => (w.r < q.hit && w.r < w.range) ? { x: w.x + q.ux * w.r, y: w.y + q.uy * w.r } : null);
+    this.poly(g, pts, snd ? 8 : E.thick, "rgba(" + rgb + (0.22 * k).toFixed(3) + ")", w.sector);
+    this.poly(g, pts, snd ? 2 : 4, "rgba(" + (snd ? "255,255,255," : "205,240,255,") + k.toFixed(3) + ")", w.sector);
+    if (snd) return;
+    g.fillStyle = "#fff";
+    for (const q of w.rays) {   // вспышки в точках удара
+      const d = w.r - q.hit;
+      if (q.h && d >= 0 && d < 120) { g.globalAlpha = (1 - d / 120) * f; g.beginPath(); g.arc(q.h.x, q.h.y, 3.5, 0, 6.283); g.fill(); }
+    }
+    g.globalAlpha = 1;
+    this.drawRefl(g, w, f);
+  },
+  // Отражённые «куски сферы»: соседние лучи одной грани соединены дугой
+  drawRefl(g, w, f) {
+    const E = CONFIG.echo; let prev = null;
+    g.lineWidth = 3; g.lineCap = "round";
+    for (let i = 0; i < w.n; i++) {
+      const q = w.rays[i], r = q.rf, rr = w.r - q.hit;
+      if (!r) continue;
+      const p = (rr > 0 && rr < r.hit) ? { x: r.sx + r.ux * rr, y: r.sy + r.uy * rr, grp: q.grp, i, a: (1 - rr / E.reflR) * f } : null;
+      if (p && prev && prev.grp === p.grp && p.i - prev.i <= E.reflEvery) {
+        g.strokeStyle = "rgba(190,230,255," + (0.8 * Math.min(p.a, prev.a)).toFixed(3) + ")";
+        g.beginPath(); g.moveTo(prev.x, prev.y); g.lineTo(p.x, p.y); g.stroke();
+      }
+      prev = p;
+    }
+  }
+};
+
+// ФАЙЛ: js/back.js — фон: каменный зал с кирпичом, окнами, дверями и колоннами; проступает силуэтом, когда эхо долетает
+const Back = {
+  items: [],
+  init() {
+    const I = this.items, wd = Level.cols * TILE;
+    for (let cy = 0; cy < Level.nrows; cy++) for (let cx = 0; cx < wd / 128; cx++) I.push({ t: "brick", x: cx * 128 + 64, y: cy * 64 + 32, u: 0 });
+    for (let x = 420; x < wd; x += 560) I.push({ t: "pillar", x, y: 384, u: 0 });
+    for (let x = 200; x < wd; x += 320) I.push({ t: "window", x, y: 210, u: 0 });
+  },
+  hit(seen) { for (const b of this.items) if (seen(b.x, b.y)) b.u = 1; },
+  update(dt) { const k = dt / CONFIG.echo.revealTime; for (const b of this.items) if (b.u > 0) b.u = Math.max(0, b.u - k); },
+  draw(g) {
+    g.lineJoin = "round"; g.strokeStyle = g.fillStyle = "#a9c2e8";
+    for (const b of this.items) {
+      if (b.u <= 0) continue;
+      if (b.t === "brick") this.brick(g, b); else this.shape(g, b);
+    }
+    g.globalAlpha = 1;
+  },
+  brick(g, b) {
+    const x0 = b.x - 64, y0 = b.y - 32;
+    g.globalAlpha = b.u * 0.26; g.lineWidth = 2; g.beginPath();
+    for (let j = 0; j < 4; j++) {
+      const y = y0 + j * 16;
+      g.moveTo(x0, y); g.lineTo(x0 + 128, y);
+      for (let x = x0 + (j % 2) * 16; x < x0 + 128; x += 32) { g.moveTo(x, y); g.lineTo(x, y + 16); }
+    }
+    g.stroke();
+  },
+  shape(g, b) {
+    const x = b.x, y = b.y; g.beginPath();
+    if (b.t === "pillar") { g.rect(x - 20, y - 320, 40, 640); g.rect(x - 30, y - 320, 60, 18); g.rect(x - 30, y + 302, 60, 18); }
+    else {
+      const w = b.t === "door" ? 56 : 48, top = y - 32, bot = y + (b.t === "door" ? 88 : 80);
+      g.moveTo(x - w, bot); g.lineTo(x - w, top); g.arc(x, top, w, Math.PI, 0); g.lineTo(x + w, bot); g.closePath();
+      if (b.t === "window") { g.moveTo(x, top - w); g.lineTo(x, bot); g.moveTo(x - w, y + 8); g.lineTo(x + w, y + 8); }
+      else { g.moveTo(x - 18, y - 60); g.lineTo(x - 18, bot); g.moveTo(x + 18, y - 60); g.lineTo(x + 18, bot); }
+    }
+    g.globalAlpha = b.u * 0.12; g.fill();
+    g.globalAlpha = b.u * 0.55; g.lineWidth = 3; g.stroke();
+  }
+};
+
+// ФАЙЛ: js/marks.js — SoundMark: дуга-стрелка к источнику чужого звука (ТЗ 8.4), пул 16
+const Marks = {
+  pool: [],
+  init() {
+    for (let i = 0; i < CONFIG.mark.pool; i++) this.pool.push({ on: false, a: 0, t: 0, k: 0 });
+    AudioManager.listeners.push(ev => this.onSound(ev));
+  },
+  onSound(ev) {
+    if (ev.source === Player) return;   // свои звуки не помечаем
+    const cy = Player.y + Player.cy;
+    if (!Player.hears(ev)) return;
+    const m = this.pool.find(o => !o.on) || this.pool[0];
+    m.on = true; m.t = CONFIG.mark.life; m.k = ev.intensity; m.tag = ev.tag; m.a = Math.atan2(ev.y - cy, ev.x - Player.x);
+  },
+  update(dt) { for (const m of this.pool) if (m.on && (m.t -= dt) <= 0) m.on = false; },
+  draw(g) {
+    const K = CONFIG.mark, cx = Player.x, cy = Player.y + Player.cy;
+    for (const m of this.pool) {
+      if (!m.on) continue;
+      const col = m.tag === "enemy_shout" ? "#ff4a4a" : (m.k >= K.yellowAt ? "#ffd84a" : "#ffffff");
+      g.globalAlpha = m.t / K.life; g.strokeStyle = col; g.fillStyle = col; g.lineWidth = 6; g.lineCap = "round";
+      g.beginPath(); g.arc(cx, cy, K.r, m.a - K.span, m.a + K.span); g.stroke();
+      g.beginPath();
+      g.moveTo(cx + Math.cos(m.a) * (K.r + 24), cy + Math.sin(m.a) * (K.r + 24));
+      g.lineTo(cx + Math.cos(m.a - 0.14) * (K.r + 4), cy + Math.sin(m.a - 0.14) * (K.r + 4));
+      g.lineTo(cx + Math.cos(m.a + 0.14) * (K.r + 4), cy + Math.sin(m.a + 0.14) * (K.r + 4));
+      g.closePath(); g.fill();
+    }
+    g.globalAlpha = 1;
+  }
+};
+
+// ФАЙЛ: js/enemy.js — ListenerGuard (ТЗ 9): слух, конус зрения, патруль → расследование → погоня → атака → поиск
+const Enemies = {
+  list: [], spawns: [],
+  // a..b — точки патруля по полу
+  add(x, y, a, b) {
+    const e = { x, y, vx: 0, vy: 0, dir: 1, ground: false, state: "PATROL", wp: [a, b], wi: 1, target: x, timer: 0, lost: 0,
+                stepT: 0, blockT: 0, searchT: 0, tele: 0, rec: 0, hit: false, cy: -64, reveal: 0, hear: 0, clock: 0, hitsE: [], hitsS: [], at: 0, anim: "guard_idle", af: 0, name: "enemy" + this.list.length };
+    this.list.push(e); this.spawns.push([x, y]); EchoManager.register(e);
+    AudioManager.listeners.push(ev => this.hear(e, ev));
+  },
+  reset() {
+    this.list.forEach((e, i) => Object.assign(e, { x: this.spawns[i][0], y: this.spawns[i][1], vx: 0, vy: 0, state: "PATROL", wi: 1,
+      timer: 0, lost: 0, tele: 0, rec: 0, blockT: 0, reveal: 0, hear: 0, clock: 0, hitsE: [], hitsS: [], at: 0, anim: "guard_idle", af: 0 }));
+  },
+  // Слух (ТЗ 9.2): слышит только героя и камни. Громкий звук героя рядом — погоня, иначе идёт к точке звука
+  hear(e, ev) {
+    const C = CONFIG.enemy, hero = ev.source === Player;
+    if (!hero && ev.tag !== "stone") return;
+    if (e.state === "ATTACK" || (e.state === "CHASE" && !hero)) return;
+    if (ev.falloffAt({ x: e.x, y: e.y + e.cy }) < C.hearMin) return;
+    const d = Math.hypot(ev.x - e.x, ev.y - (e.y + e.cy));
+    if (hero && (e.state === "CHASE" || (ev.intensity >= C.chaseIntensity && d <= C.chaseRadius))) { this.setState(e, "CHASE"); e.target = ev.x; e.lost = 0; return; }
+    this.setState(e, "INVESTIGATE"); e.target = ev.x; e.timer = 0;
+  },
+  // Смена состояния с голосом: тихое «хм?» при подозрении, окрик при погоне (звук слышен герою, метки жёлтая и красная)
+  setState(e, st) {
+    const from = e.state;
+    if (from === st) return;
+    e.state = st;
+    if (st === "CHASE" && from !== "ATTACK") this.voice(e, "shout");
+    else if (st === "INVESTIGATE" && (from === "PATROL" || from === "SEARCH")) this.voice(e, "hm");
+  },
+  voice(e, k) {
+    const ev = new SoundEvent(e, "enemy_" + k, SOUNDS.enemy[k]);
+    ev.y = e.y - 104;   // голос идёт от головы
+    AudioManager.emit(ev);
+  },
+  update(dt) {
+    const C = CONFIG.enemy;
+    for (const e of this.list) {
+      e.vx = 0; e.walk = false;
+      this.think(e, dt, C);
+      e.vy = Math.min(e.vy + CONFIG.player.gravity * dt, CONFIG.player.maxFall);
+      const x0 = e.x;
+      Player.moveX.call(e, dt, C); Player.moveY.call(e, dt, C);   // та же физика тайлов, что у героя
+      if (this.overlaps(e)) { e.x = x0; e.vx = 0; }   // страж не проходит сквозь героя
+      e.clock += dt; this.fade(e);
+      if (e.walk) this.moved(e, Math.abs(e.x - x0) > 0.05, dt, C);
+      this.animate(e, dt, C);
+    }
+  },
+  think(e, dt, C) {
+    if (e.state !== "ATTACK" && this.sees(e, C)) { this.setState(e, "CHASE"); e.target = Player.x; e.lost = 0; }
+    const s = e.state;
+    if (s === "PATROL") this.go(e, e.wp[e.wi], C.patrolSpeed, C, () => { e.wi = 1 - e.wi; });
+    else if (s === "INVESTIGATE") this.go(e, e.target, C.investigateSpeed, C, () => { e.state = "LISTEN"; e.timer = C.listenTime; });
+    else if (s === "LISTEN") { if ((e.timer -= dt) <= 0) { e.state = "SEARCH"; e.searchT = C.searchTime; this.pick(e, C); } }
+    else if (s === "SEARCH") this.search(e, dt, C);
+    else if (s === "CHASE") this.chase(e, dt, C);
+    else if (s === "ATTACK") this.attack(e, dt, C);
+  },
+  go(e, tx, speed, C, onArrive) {
+    const dx = tx - e.x;
+    if (Math.abs(dx) <= C.arrive) onArrive(); else { e.dir = Math.sign(dx); e.vx = e.dir * speed; e.walk = true; }
+  },
+  pick(e, C) { e.target = e.x + (Math.random() * 2 - 1) * C.searchSpread; },
+  search(e, dt, C) {
+    if ((e.searchT -= dt) <= 0) { e.state = "PATROL"; e.wi = Math.abs(e.wp[0] - e.x) < Math.abs(e.wp[1] - e.x) ? 0 : 1; return; }
+    this.go(e, e.target, C.patrolSpeed, C, () => this.pick(e, C));
+  },
+  // Зрение: конус 260 px, угол 60°, стена перекрывает
+  sees(e, C) {
+    if (Player.hp <= 0) return false;
+    const dx = Player.x - e.x, dy = (Player.y + Player.cy) - (e.y + e.cy), d = Math.hypot(dx, dy) || 1;
+    if (d > C.sightR || Math.abs(Math.atan2(dy, dx * e.dir)) > C.sightHalf) return false;
+    return !Level.cast(e.x, e.y + e.cy, dx / d, dy / d, d);
+  },
+  chase(e, dt, C) {
+    e.lost += dt; if (e.rec > 0) e.rec -= dt;
+    if (e.lost > C.lostTime) { e.state = "SEARCH"; e.searchT = C.searchTime; this.pick(e, C); return; }
+    const dx = Player.x - e.x;
+    if (Math.abs(dx) <= C.attackDist && Math.abs(Player.y - e.y) < 90 && Player.hp > 0 && e.rec <= 0 && e.lost < 0.3) {
+      e.state = "ATTACK"; e.dir = Math.sign(dx) || e.dir; e.tele = C.telegraph; e.hit = false;
+      AudioManager.emit(new SoundEvent(e, "enemy_swing", SOUNDS.enemy.swing));
+    } else this.go(e, e.target, C.chaseSpeed, C, () => {});
+  },
+  // Телеграф 0.45 с (взмах, звук, белая вспышка клинка) → удар → восстановление 0.6 с
+  attack(e, dt, C) {
+    if (e.tele > 0) { e.tele -= dt; return; }
+    if (!e.hit) {
+      e.hit = true; e.rec = C.recover;
+      const fx = (Player.x - e.x) * e.dir;
+      if (fx > -12 && fx <= C.hitR && Math.abs(Player.y - e.y) < 100) Player.hurt(e);
+      return;
+    }
+    if ((e.rec -= dt) <= 0) { e.state = "CHASE"; e.lost = 0; }
+  },
+  // Идёт и шумит, только пока реально сдвигается; упёрся в стену дольше 0.3 с — бросает это дело
+  moved(e, ok, dt, C) {
+    if (ok) { e.blockT = 0; this.step(e, dt, C); return; }
+    if ((e.blockT += dt) <= 0.3) return;
+    e.blockT = 0;
+    if (e.state === "CHASE") e.lost = C.lostTime;
+    else if (e.state === "INVESTIGATE") { e.state = "LISTEN"; e.timer = C.listenTime; }
+    else if (e.state === "PATROL") e.wi = 1 - e.wi;
+  },
+  step(e, dt, C) {
+    if ((e.stepT -= dt) > 0) return;
+    e.stepT = e.state === "CHASE" ? C.chaseStepEvery : C.stepEvery;
+    const ev = new SoundEvent(e, "enemy_step", SOUNDS.enemy.step);
+    ev.y = e.y - 4;   // звук шага рождается у ступней
+    AudioManager.emit(ev);
+  },
+  // Тела твёрдые: пересечение по высоте (прыжок над головой — нет) и по ширине
+  overlaps(e) {
+    if (Player.hp <= 0) return false;
+    const hh = Player.crouch ? CONFIG.crouch.bodyH : CONFIG.player.bodyH;
+    return Player.y > e.y - CONFIG.enemy.bodyH + 12 && Player.y - hh < e.y - 4 && Math.abs(Player.x - e.x) < (CONFIG.player.bodyW + CONFIG.enemy.bodyW) / 2;
+  },
+  // Герой упёрся в стража — выталкиваем его с той стороны, откуда пришёл (если там не стена)
+  collide() {
+    for (const e of this.list) {
+      if (!this.overlaps(e)) continue;
+      const hw = (CONFIG.player.bodyW + CONFIG.enemy.bodyW) / 2, dx = Player.x - e.x, side = dx !== 0 ? Math.sign(dx) : (Player.px < e.x ? -1 : 1);
+      if (Level.solidAt(e.x + side * (hw + CONFIG.player.bodyW / 2), Player.y - 20)) continue;
+      Player.x = e.x + side * hw; if (Player.vx * side < 0) Player.vx = 0;
+    }
+  },
+  // Куски тела, проступившие от касания, угасают
+  fade(e) {
+    const t = CONFIG.echo.revealTime, h = CONFIG.sound.hearTime;
+    e.hitsE = e.hitsE.filter(q => e.clock - q.t < t); e.hitsS = e.hitsS.filter(q => e.clock - q.t < h);
+  },
+  // Анимация по состоянию: патруль — ходьба с мечом вверх, погоня — бег, осмотр — прислушивается, атака — взмах двумя руками
+  animate(e, dt, C) {
+    let a = "guard_idle", k = 1;
+    if (e.state === "ATTACK") {
+      a = "attack_slash";
+      e.af = e.tele > 0 ? Math.min(3, Math.floor((1 - e.tele / C.telegraph) * 4)) : 4 + Math.min(5, Math.floor((1 - Math.max(0, e.rec) / C.recover) * 6));
+    } else {
+      if (e.state === "CHASE") a = "guard_run";
+      else if (e.state === "LISTEN") a = "guard_listen";
+      else if (e.walk) { a = "guard_walk"; k = Math.max(0.6, Math.abs(e.vx) / C.patrolSpeed); }
+      if (a !== e.anim) e.at = 0;
+      e.at += dt * k; e.af = Hero.frameAt(a, e.at, 0, false);
+    }
+    e.anim = a;
+  },
+  // Слой рисуется целиком в отдельный холст; с hits — только куски вокруг точек касания (маска), потом накладывается с прозрачностью
+  layer(g, e, style, a, hits, life) {
+    if (!this.buf) { this.buf = document.createElement("canvas"); this.bx = this.buf.getContext("2d"); this.mk = document.createElement("canvas"); this.mx = this.mk.getContext("2d"); }
+    const w = Math.round(360 * S), h = Math.round(300 * S);
+    if (this.buf.width !== w) { this.buf.width = w; this.buf.height = h; this.mk.width = w; this.mk.height = h; }
+    this.bx.setTransform(1, 0, 0, 1, 0, 0); this.bx.clearRect(0, 0, w, h); this.bx.setTransform(S, 0, 0, S, 0, 0);
+    Hero.draw(this.bx, e.anim, e.af, 180, 250, e.dir, 1, false, null, style);
+    if (hits) {
+      const m = this.mx, K = CONFIG.enemy;
+      m.setTransform(1, 0, 0, 1, 0, 0); m.clearRect(0, 0, w, h); m.setTransform(S, 0, 0, S, 0, 0);
+      for (const q of hits) {
+        const age = e.clock - q.t, al = Math.max(0, 1 - age / life);
+        if (al <= 0) continue;
+        const r = Math.min(K.hitSpread, 10 + K.hitGrow * age), cx = 180 + q.x, cy = 250 + q.y, gr = m.createRadialGradient(cx, cy, 0, cx, cy, r);
+        gr.addColorStop(0, "rgba(255,255,255," + al.toFixed(3) + ")"); gr.addColorStop(0.65, "rgba(255,255,255," + (al * 0.85).toFixed(3) + ")"); gr.addColorStop(1, "rgba(255,255,255,0)");
+        m.fillStyle = gr; m.beginPath(); m.arc(cx, cy, r, 0, 6.283); m.fill();
+      }
+      this.bx.setTransform(1, 0, 0, 1, 0, 0); this.bx.globalCompositeOperation = "destination-in"; this.bx.drawImage(this.mk, 0, 0); this.bx.globalCompositeOperation = "source-over";
+    }
+    g.globalAlpha = a; g.drawImage(this.buf, 0, 0, w, h, e.x - 180, e.y - 250, 360, 300); g.globalAlpha = 1;
+  },
+  // Враг в темноте: белый силуэт — услышан волной звука; слабые детали — рядом с героем; красный силуэт — проявлен эхом (ТЗ 7.4)
+  draw(g) {
+    const C = CONFIG.enemy;
+    for (const e of this.list) {
+      const near = Math.hypot(e.x - Player.x, e.y - Player.y) <= (Player.crouch ? CONFIG.crouch.passiveR : C.passiveR);
+      if (e.hitsS.length) this.layer(g, e, Hero.flat("#ffffff"), 0.6, e.hitsS, CONFIG.sound.hearTime);
+      if (near) this.layer(g, e, Hero.GUARD_DIM, C.detailAlpha);
+      if (e.hitsE.length) this.layer(g, e, Hero.flat(CONFIG.palette.enemy), 0.9, e.hitsE, CONFIG.echo.revealTime);
+      if (e.state === "ATTACK") {   // вспышка клинка при замахе видна всегда
+        const p = e.tele > 0 ? 1 - e.tele / C.telegraph : 1;
+        g.globalAlpha = 0.5 + 0.5 * p; Hero.draw(g, e.anim, e.af, e.x, e.y, e.dir, 1, true, null, Hero.BLADE); g.globalAlpha = 1;
+      }
+      if (e.reveal > 0) { g.globalAlpha = e.reveal; g.fillStyle = "#fff"; g.font = "18px sans-serif"; g.textAlign = "center"; g.fillText(e.state, e.x, e.y - 140); g.globalAlpha = 1; }
+    }
+  }
+};
+
+// ФАЙЛ: js/stones.js — камни (дополнение к ТЗ): бросок отвлекает врагов звуком падения
+const Stones = {
+  n: 0, list: [], cd: 0,
+  reset() { this.n = CONFIG.stone.count; this.list = []; this.cd = 0; },
+  // Тап — бросок вперёд-вверх, перетаскивание — направление и сила
+  vel(dx, dy) {
+    const K = CONFIG.stone, len = Math.hypot(dx, dy);
+    if (len < K.tap) return { vx: Player.dir * Math.cos(K.tapAngle) * K.speed, vy: -Math.sin(K.tapAngle) * K.speed };
+    const sp = Math.min(K.maxSpeed, K.speed * (0.5 + len / K.aimR));
+    return { vx: dx / len * sp, vy: dy / len * sp };
+  },
+  start(v) { return { x: Player.x + (Math.sign(v.vx) || Player.dir) * 16, y: Player.y - 104 }; },
+  launch(t) {
+    const v = this.vel(t.dx, t.dy), p = this.start(v);
+    if (Level.solidAt(p.x, p.y)) { p.x = Player.x; p.y = Player.y - 64; }
+    if (v.vx) Player.dir = Math.sign(v.vx);
+    this.list.push({ x: p.x, y: p.y, vx: v.vx, vy: v.vy });
+    this.n--; this.cd = CONFIG.stone.cooldown; Player.throwT = 0.25;
+  },
+  update(dt) {
+    const K = CONFIG.stone, t = Input.takeThrow();
+    if (this.cd > 0) this.cd -= dt;
+    if (t && this.n > 0 && this.cd <= 0 && !Player.locked()) this.launch(t);
+    for (let i = this.list.length - 1; i >= 0; i--) {
+      const s = this.list[i], dx = s.vx * dt, dy = s.vy * dt, len = Math.hypot(dx, dy) || 1;
+      const h = Level.cast(s.x, s.y, dx / len, dy / len, len);
+      if (h) { this.land(h.x, h.y); this.list.splice(i, 1); continue; }
+      s.x += dx; s.y += dy; s.vy += K.gravity * dt;
+      if (s.y > Level.h() + 200 || s.x < -50 || s.x > Level.cols * TILE + 50) this.list.splice(i, 1);
+    }
+  },
+  // Место падения — источник звука: враги идут проверять, герой видит белую волну
+  land(x, y) {
+    const ev = new SoundEvent({ x, y, cy: 0 }, "stone", SOUNDS.player.stone);
+    ev.always = true; AudioManager.emit(ev);
+  },
+  draw(g) {
+    g.fillStyle = "#d8dde8";
+    for (const s of this.list) { g.beginPath(); g.arc(s.x, s.y, 5, 0, 6.283); g.fill(); }
+    const a = Input.aim;
+    if (!a) return;
+    const v = this.vel(a.x - a.ox, a.y - a.oy), p = this.start(v); let x = p.x, y = p.y, vy = v.vy;
+    g.fillStyle = "#fff";
+    for (let i = 0; i < 40; i++) {   // пунктир траектории
+      const dx = v.vx * 0.03, dy = vy * 0.03, len = Math.hypot(dx, dy) || 1;
+      if (Level.cast(x, y, dx / len, dy / len, len)) break;
+      x += dx; y += dy; vy += CONFIG.stone.gravity * 0.03;
+      if (i % 2 === 0) { g.globalAlpha = 0.85 - i * 0.015; g.beginPath(); g.arc(x, y, 3, 0, 6.283); g.fill(); }
+    }
+    g.globalAlpha = 1;
+  }
+};
+
+// ФАЙЛ: js/cloak.js — физика плаща: цепочка точек (верле) тянется за плечами героя
+const Cloak = {
+  pts: [], prev: [],
+  init(ax, ay) {
+    const K = CONFIG.cloak; this.pts = []; this.prev = [];
+    for (let i = 0; i < K.n; i++) {
+      this.pts.push({ x: ax, y: ay + i * K.seg }); this.prev.push({ x: ax, y: ay + i * K.seg });
+    }
+  },
+  // Шаг физики (60/с). ax, ay — мировая точка крепления у плеч, dir — куда смотрит герой
+  step(dt, ax, ay, dir) {
+    const K = CONFIG.cloak, P = this.pts, Q = this.prev;
+    P[0].x = ax; P[0].y = ay; Q[0].x = ax; Q[0].y = ay;
+    for (let i = 1; i < K.n; i++) {
+      const vx = (P[i].x - Q[i].x) * K.damp, vy = (P[i].y - Q[i].y) * K.damp;
+      Q[i].x = P[i].x; Q[i].y = P[i].y;
+      P[i].x += vx + (ax - dir * K.backX * i - P[i].x) * K.spring;
+      P[i].y += vy + K.gravity * dt * dt + (ay + K.seg * i - P[i].y) * K.spring;
+    }
+    for (let it = 0; it < K.iter; it++) {
+      for (let i = 1; i < K.n; i++) {
+        const a = P[i - 1], b = P[i], dx = b.x - a.x, dy = b.y - a.y;
+        const d = Math.hypot(dx, dy) || 1, k = (d - K.seg) / d, w = i === 1 ? 1 : 0.5;
+        b.x -= dx * k * w; b.y -= dy * k * w;
+        if (i > 1) { a.x += dx * k * 0.5; a.y += dy * k * 0.5; }
+      }
+    }
+  }
+};
+
+// ФАЙЛ: js/hero.js — процедурный герой из «скелета» (ТЗ 5): позы по ключам, один стиль для всех анимаций
+const Hero = {
+  PAL: { tunic: "#2f5a3a", tunicB: "#244630", pants: "#3a3d44", pantsB: "#2c2f35", boot: "#5a3b22", bootB: "#44301c",
+         cloak: "#3b3f46", hair: "#b8bcc4", skin: "#c9a27c", skinB: "#a8855f", belt: "#6b4a2b" },
+  // Ключевые позы: [наклон, голова, бедроA, коленоA, бедроB, коленоB, плечоA, локтьA, плечоB, локтьB, плащ, щелчок, поворот, сдвиг]
+  // Углы в градусах: 0 = вниз, плюс = вперёд. Кадры берутся из ключей равномерно (число кадров — из ANIMS).
+  KEYS: {
+    idle: [[2,-4, 6,-12, -4,-2, 7,14, -5,14, .18,0, 0,0], [0,0, 0,-3, 0,-3, 4,10, -3,10, .06,0, 0,0],
+           [-1,5, -5,-2, 6,-12, 3,12, -8,16, .18,0, 0,0], [0,0, 0,-3, 0,-3, 4,10, -3,10, .06,0, 0,0]],
+    run: [[12,0, 35,-15, -35,-45, -45,70, 45,80, .95,0, 0,0], [12,0, 5,-10, 15,-100, -10,60, 10,70, .95,0, 0,0],
+          [12,0, -35,-45, 35,-15, 45,80, -45,70, .95,0, 0,0], [12,0, 15,-100, 5,-10, 10,70, -10,60, .95,0, 0,0]],
+    jump_up: [[20,0, 55,-95, 55,-95, -20,30, -20,30, 0,0, 0,0], [-4,0, 4,-4, 4,-4, 160,15, 160,15, .2,0, 0,0],
+              [-3,0, 10,-30, -8,-50, 150,15, 130,15, .35,0, 0,0], [0,0, 25,-60, 5,-70, 100,20, 90,20, .5,0, 0,0],
+              [4,0, 20,-30, 5,-25, 110,10, 100,10, .7,0, 0,0]],
+    jump_forward: [[12,0, 35,-15, -35,-45, -45,70, 45,80, .95,0, 0,0], [18,0, 30,-40, -30,-10, -30,40, 60,40, .9,0, 0,0],
+                   [25,0, 40,-20, -40,-5, 150,10, -60,10, 1,0, 0,0], [20,0, 50,-40, -30,-30, 140,10, -40,10, 1,0, 0,0],
+                   [10,0, 40,-50, 10,-60, 90,20, -20,20, .8,0, 0,0], [10,0, 25,-25, 20,-30, 60,20, 40,20, .6,0, 0,0]],
+    fall_land: [[3,0, 10,-15, -5,-20, 120,10, 100,10, .6,0, 0,0], [8,0, 25,-30, 15,-25, 70,20, 50,20, .4,0, 0,0],
+                [30,0, 70,-110, 60,-100, 30,50, 20,50, 0,0, 0,0], [28,0, 68,-108, 58,-98, 28,50, 18,50, 0,0, 0,0],
+                [15,0, 40,-60, 35,-55, 15,30, 10,30, 0,0, 0,0], [0,0, 0,0, 0,0, 5,10, -5,10, .1,0, 0,0]],
+    echo_click: [[0,0, 0,-5, 0,0, 5,10, -5,10, .1,0, 0,0], [0,0, 0,-5, 0,0, 100,100, -5,10, .1,0, 0,0],
+                 [0,0, 0,-5, 0,0, 105,105, -5,10, .1,1, 0,0], [0,14, 0,-5, 0,0, 105,105, -5,10, .1,0, 0,0],
+                 [0,14, 0,-5, 0,0, 60,60, -5,10, .1,0, 0,0]],
+    listen: [[2,12, 5,-5, -5,-3, 4,15, -4,12, .05,0, 0,0], [2,16, 5,-5, -5,-3, 4,15, -4,12, .05,0, 0,0]],
+    hurt: [[-15,-10, 10,-10, -20,-30, -50,30, -40,30, 1,0, -10,-8], [-25,-15, 15,-20, -25,-40, -60,40, -50,40, 1,0, -18,-14],
+           [-8,-5, 8,-10, -10,-20, -20,30, -20,30, .6,0, -6,-6]],
+    death: [[-15,-10, 10,-10, -20,-30, -50,30, -40,30, 1,0, -10,-6], [10,10, 70,-130, 60,-130, 30,40, 20,40, .8,0, 0,-10],
+            [-10,15, 75,-135, 60,-125, 10,20, 10,20, .5,0, -20,-18], [-5,10, 20,-20, 10,-15, 20,20, 30,25, .2,0, -60,-30],
+            [0,0, 5,-5, 0,-5, 30,20, 40,25, .1,0, -88,-40], [4,0, 5,-5, 0,-5, 30,20, 40,25, .1,0, -88,-40]],
+    // --- лист sword: к 14 числам добавлены [угол клинка (0 вниз, 90 вперёд, 180 вверх), режим меча, звон] ---
+    sword_draw: [[0,0, 0,-3, 0,-3, 5,10, -5,10, .1,0, 0,0, -70,2,0], [3,0, 3,-3, -3,-3, 8,70, -5,10, .1,0, 0,0, -70,2,0],
+                 [3,0, 3,-3, -3,-3, 8,70, -5,10, .1,0, 0,0, -70,2,.5], [6,0, 10,-10, -8,-6, 20,60, -15,25, .2,0, 0,0, 20,1,1],
+                 [8,-2, 24,-26, -22,-12, 62,48, -25,40, .1,0, 0,0, 125,1,.4]],
+    combat_idle: [[8,-2, 24,-26, -22,-12, 62,48, -25,40, .1,0, 0,0, 125,1,.2], [7,0, 22,-24, -20,-10, 60,50, -22,38, .06,0, 0,0, 122,1,.1],
+                  [9,2, 26,-28, -24,-14, 64,46, -28,42, .12,0, 0,0, 128,1,.2], [7,0, 22,-24, -20,-10, 60,50, -22,38, .06,0, 0,0, 122,1,.1]],
+    combat_run: [[14,0, 35,-15, -35,-45, 40,70, 45,80, .9,0, 0,0, 75,1,1], [14,0, 5,-10, 15,-100, 36,66, 10,70, .9,0, 0,0, 72,1,1],
+                 [14,0, -35,-45, 35,-15, 44,74, -45,70, .9,0, 0,0, 80,1,1], [14,0, 15,-100, 5,-10, 36,66, -10,60, .9,0, 0,0, 72,1,1]],
+    attack_slash: [[8,0, 24,-26, -22,-12, 62,48, -25,40, .1,0, 0,0, 125,1,.2], [2,-4, 20,-22, -26,-14, 120,65, -35,40, .2,0, 0,0, 190,1,.6],
+                   [-6,-6, 18,-20, -28,-14, 150,70, -40,40, .2,0, 0,0, 215,1,.6], [14,0, 32,-26, -30,-16, 100,30, -48,40, .7,0, 0,0, 130,1,1],
+                   [22,4, 36,-26, -34,-20, 70,5, -55,40, .9,0, 0,0, 85,1,0], [24,6, 38,-26, -35,-20, 62,5, -58,40, .9,0, 0,0, 60,1,0],
+                   [22,6, 36,-24, -34,-20, 52,10, -55,40, .8,0, 0,0, 35,1,.5], [16,2, 30,-24, -28,-16, 56,30, -45,40, .5,0, 0,0, 70,1,.6],
+                   [12,0, 26,-24, -24,-12, 60,44, -35,40, .3,0, 0,0, 100,1,.4], [8,0, 24,-26, -22,-12, 62,48, -25,40, .1,0, 0,0, 125,1,.2]],
+    parry: [[4,-4, 14,-14, -16,-8, 40,50, -20,30, .3,0, 0,-2, 125,1,.3], [6,0, 22,-20, -20,-10, 80,70, -25,40, .4,0, 0,0, 160,1,.6],
+            [6,0, 24,-22, -22,-10, 88,75, -28,40, .4,1, 0,0, 165,1,0], [5,0, 24,-22, -22,-10, 88,75, -28,40, .4,0, 0,0, 168,1,0],
+            [8,0, 24,-26, -22,-12, 62,48, -25,40, .1,0, 0,0, 125,1,.2]],
+    pickup: [[10,0, 20,-25, -15,-20, 30,20, -10,20, .2,0, 0,0, 0,0,0], [35,10, 50,-70, 40,-60, 25,10, -10,20, .1,0, 0,0, 0,0,0],
+             [35,10, 50,-70, 40,-60, 25,10, -10,20, .1,0, 0,0, 90,1,.5], [18,0, 30,-40, -10,-30, 70,60, -10,20, .2,0, 0,0, 130,1,.4],
+             [4,0, 4,-5, 0,-5, 80,80, -5,12, .1,0, 0,0, 175,1,.8]]
+  },
+  // Длительность кадра (с): 1/fps + удержание (hold) для кадров удара
+  frameDur(a, i) { const h = a.hold; return 1 / a.fps + (h && i >= h.from && i <= h.to ? h.extra / (h.to - h.from + 1) : 0); },
+  duration(name) { const a = ANIMS[name]; let d = 0; for (let i = 0; i < a.frames; i++) d += this.frameDur(a, i); return d; },
+  // Номер кадра по времени анимации
+  frameAt(name, t, start, freeze) {
+    const a = ANIMS[name], s = start === undefined ? (a.start || 0) : start;
+    if (freeze) return s;
+    if (a.hold) {
+      let i = 0, acc = this.frameDur(a, 0);
+      while (i < a.frames - 1 && t >= acc) { i++; acc += this.frameDur(a, i); }
+      return i;
+    }
+    const f = Math.floor(t * a.fps) + s;
+    return a.loop ? f % a.frames : Math.min(f, a.frames - 1);
+  },
+  // Поза кадра f: линейная смесь соседних ключей
+  pose(name, f) {
+    const a = ANIMS[name], K = this.KEYS[name], L = K.length;
+    const pos = a.loop ? f / a.frames * L : (a.frames > 1 ? f / (a.frames - 1) * (L - 1) : 0);
+    const i = Math.floor(pos), t = pos - i;
+    const A = K[i % L], B = a.loop ? K[(i + 1) % L] : K[Math.min(i + 1, L - 1)];
+    return A.map((v, k) => v + (B[k] - v) * t);
+  },
+  // Скелет: суставы по позе (начало координат = таз)
+  rig(P) {
+    const R = Math.PI / 180, lean = P[0] * R, ha = lean + P[1] * R;
+    const sh = { x: Math.sin(lean) * 38, y: -Math.cos(lean) * 38 };
+    const limb = (o, a1, b1, l1, l2) => {
+      const A = a1 * R, B = (a1 + b1) * R, m = { x: o.x + Math.sin(A) * l1, y: o.y + Math.cos(A) * l1 };
+      return [o, m, { x: m.x + Math.sin(B) * l2, y: m.y + Math.cos(B) * l2 }];
+    };
+    const hip = { x: 0, y: 0 }, sp = { x: sh.x, y: sh.y + 5 };
+    const J = { hip, sh, head: { x: sh.x + Math.sin(ha) * 16, y: sh.y - Math.cos(ha) * 16, a: ha },
+             lA: limb(hip, P[2], P[3], 28, 28), lB: limb(hip, P[4], P[5], 28, 28),
+             aA: limb(sp, P[6], P[7], 24, 22), aB: limb(sp, P[8], P[9], 24, 22) };
+    return this.grip(J, P, sp);
+  },
+  // Хват двумя руками: дальняя рука тянется к рукояти (двухсуставная рука, обратная кинематика)
+  grip(J, P, sp) {
+    const k = P[17] || 0;
+    if (k <= 0 || !(P[15] > 0.5 && P[15] <= 1.5)) return J;
+    const th = P[14] * Math.PI / 180, h = J.aA[2], t = { x: h.x - Math.sin(th) * 7, y: h.y - Math.cos(th) * 7 };
+    const dx = t.x - sp.x, dy = t.y - sp.y, full = Math.hypot(dx, dy) || 1, d = Math.min(full, 45.5), l1 = 24, l2 = 22;
+    const A = Math.acos(Math.max(-1, Math.min(1, (l1 * l1 + d * d - l2 * l2) / (2 * l1 * d)))), a1 = Math.atan2(dx, dy) - A;
+    const m = { x: sp.x + Math.sin(a1) * l1, y: sp.y + Math.cos(a1) * l1 }, e = { x: sp.x + dx / full * d, y: sp.y + dy / full * d };
+    const L = J.aB, mix = (a, b) => ({ x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k });
+    J.aB = [L[0], mix(L[1], m), mix(L[2], e)];
+    return J;
+  },
+  seg(g, a, b, w, c) {
+    g.strokeStyle = c; g.lineWidth = w; g.lineCap = "round";
+    g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.stroke();
+  },
+  leg(g, L, back) {
+    const C = this.PAL, p = back ? C.pantsB : C.pants, b = back ? C.bootB : C.boot, m = L[1], k = L[2];
+    this.seg(g, L[0], m, 14, p); this.seg(g, m, k, 12, p);
+    this.seg(g, { x: (m.x + k.x) / 2, y: (m.y + k.y) / 2 }, k, 13, b);
+    this.seg(g, k, { x: k.x + 11, y: k.y + 2 }, 9, b);
+  },
+  arm(g, L, back) {
+    const C = this.PAL, sk = back ? C.skinB : C.skin;
+    this.seg(g, L[0], L[1], 10, back ? C.tunicB : C.tunic); this.seg(g, L[1], L[2], 8, sk);
+    g.fillStyle = sk; g.beginPath(); g.arc(L[2].x, L[2].y, 5, 0, 6.283); g.fill();
+  },
+  // Шлем стража: закрытый, с прорезью и гребнем (вместо повязки и седых волос героя)
+  helm(g, C, f) {
+    this.seg(g, { x: -6, y: -13 }, { x: -23, y: -10 + Math.sin(f * 1.1) * 2 }, 6, C.cloak);
+    g.fillStyle = C.armor; g.beginPath(); g.arc(0, 0, 15, 0, 6.283); g.fill();
+    g.fillStyle = C.visor; g.fillRect(3, -6, 13, 4);
+    g.fillStyle = C.skin; g.fillRect(6, 5, 9, 5);
+  },
+  head(g, h, f) {
+    const C = this.PAL;
+    g.save(); g.translate(h.x, h.y); g.rotate(h.a);
+    if (this.style && this.style.guard) { this.helm(g, C, f); g.restore(); return; }
+    g.fillStyle = C.skin; g.beginPath(); g.arc(0, 0, 14, 0, 6.283); g.fill();
+    g.beginPath(); g.arc(14, 3, 2.5, 0, 6.283); g.fill();
+    g.fillStyle = C.hair; g.beginPath(); g.arc(0, 0, 14.5, Math.PI * 0.55, Math.PI * 1.8); g.closePath(); g.fill();
+    g.fillStyle = "#08080a"; g.fillRect(-15, -6, 30, 7);
+    this.seg(g, { x: -14, y: -3 }, { x: -27, y: 3 + Math.sin(f * 1.3) * 2 }, 4, "#08080a");
+    g.restore();
+  },
+  // Статичный плащ для DEV-просмотра: c = 0 висит, c = 1 летит назад
+  cloakChain(J, c, f) {
+    const a = { x: J.sh.x - 5, y: J.sh.y + 3 }, pts = [];
+    for (let i = 0; i < 6; i++) {
+      const t = i / 5;
+      pts.push({ x: a.x - t * (8 + c * 62) - Math.sin(t * 3 + f) * (2 + 4 * c) * t,
+                 y: a.y + t * (72 - c * 60) + Math.cos(t * 3 + f * 1.3) * 3 * c * t });
+    }
+    return pts;
+  },
+  // Рисует плащ лентой по цепочке точек с рваным низом (в любых координатах)
+  drawCloak(g, pts) {
+    const hw = [7, 8, 9, 10, 11, 11], n = pts.length, L = [], R = [];
+    for (let i = 0; i < n; i++) {
+      const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)];
+      const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1, nx = -dy / d, ny = dx / d;
+      L.push({ x: pts[i].x + nx * hw[i], y: pts[i].y + ny * hw[i] });
+      R.push({ x: pts[i].x - nx * hw[i], y: pts[i].y - ny * hw[i] });
+    }
+    const e = pts[n - 1], q = pts[n - 2], ex = e.x - q.x, ey = e.y - q.y, ed = Math.hypot(ex, ey) || 1;
+    const tl = L[n - 1], tr = R[n - 1], ux = ex / ed, uy = ey / ed;
+    g.fillStyle = this.PAL.cloak; g.beginPath(); g.moveTo(L[0].x, L[0].y);
+    for (let i = 1; i < n; i++) g.lineTo(L[i].x, L[i].y);
+    g.lineTo(tl.x + (tr.x - tl.x) * 0.33 + ux * 8, tl.y + (tr.y - tl.y) * 0.33 + uy * 8);
+    g.lineTo(tl.x + (tr.x - tl.x) * 0.66 + ux * 2, tl.y + (tr.y - tl.y) * 0.66 + uy * 2);
+    for (let i = n - 1; i >= 0; i--) g.lineTo(R[i].x, R[i].y);
+    g.closePath(); g.fill();
+  },
+  // Точка крепления плаща у плеч в координатах героя (ступни = 0,0), с учётом поворота позы
+  anchor(name, f) {
+    const P = this.pose(name, f), J = this.rig(P), a = P[12] * Math.PI / 180;
+    const px = J.sh.x - 5, py = J.sh.y + 3 - Math.max(J.lA[2].y, J.lB[2].y) - 6;
+    return { x: px * Math.cos(a) - py * Math.sin(a) + P[13], y: px * Math.sin(a) + py * Math.cos(a) - Math.abs(Math.sin(a)) * 14 };
+  },
+  // Меч с колокольчиками. Режим 1 = в руке, 2 = в ножнах на поясе. Клинок: угол P[14], звон P[16]
+  sword(g, J, P, f) {
+    const mode = P[15] > 1.5 ? 2 : (P[15] > 0.5 ? 1 : 0);
+    if (!mode) return;
+    const th = P[14] * Math.PI / 180, ux = Math.sin(th), uy = Math.cos(th), nx = -uy, ny = ux;
+    const H = mode === 1 ? J.aA[2] : { x: 20, y: -6 }, len = mode === 1 ? 60 : 50;
+    const gd = { x: H.x + ux * 5, y: H.y + uy * 5 }, tip = { x: gd.x + ux * len, y: gd.y + uy * len };
+    const S = this.style || {}, K = this.PAL;
+    if (S.bladeOnly) { this.seg(g, gd, tip, 7, "rgba(255,255,255,0.9)"); return; }
+    this.seg(g, { x: H.x - ux * 9, y: H.y - uy * 9 }, gd, 6, K.grip || "#4a3424");
+    g.fillStyle = K.gold || "#d9b24a"; g.beginPath(); g.arc(H.x - ux * 9, H.y - uy * 9, 4, 0, 6.283); g.fill();
+    if (mode === 1) {
+      g.fillStyle = K.blade || "#d5dbe5"; g.beginPath(); g.moveTo(gd.x + nx * 3, gd.y + ny * 3);
+      g.lineTo(tip.x, tip.y); g.lineTo(gd.x - nx * 3, gd.y - ny * 3); g.closePath(); g.fill();
+      this.seg(g, gd, tip, 1.5, S.guard ? K.blade : "#ffffff");
+    } else this.seg(g, gd, tip, 7, "#3a2a1c");
+    this.seg(g, { x: gd.x + nx * 11, y: gd.y + ny * 11 }, { x: gd.x - nx * 11, y: gd.y - ny * 11 }, 5, K.gold || "#d9b24a");
+    (S.guard ? [] : [-11, 0, 11]).forEach((k, n) => {
+      const bx = gd.x + nx * k, by = gd.y + ny * k, sw = Math.sin(f * 2.1 + n * 1.7) * 4 * (P[16] || 0);
+      this.seg(g, { x: bx, y: by }, { x: bx + sw * 0.5, y: by + 5 }, 1.5, "#d9b24a");
+      g.fillStyle = "#f2c94c"; g.beginPath(); g.arc(bx + sw, by + 8, 4, 0, 6.283); g.fill();
+    });
+  },
+  flash(g, p) {
+    g.strokeStyle = "#fff6b0"; g.lineWidth = 3;
+    for (let i = 0; i < 6; i++) {
+      const a = i * 1.047; g.beginPath();
+      g.moveTo(p.x + Math.cos(a) * 8, p.y + Math.sin(a) * 8); g.lineTo(p.x + Math.cos(a) * 18, p.y + Math.sin(a) * 18); g.stroke();
+    }
+  },
+  // Рисует героя: ступни у точки (x, y), dir = -1 зеркалит, sc = масштаб
+  // style: null = герой; Hero.GUARD = страж; Hero.flat(цвет) = плоский силуэт; Hero.BLADE = только клинок
+  draw(g, name, f, x, y, dir, sc, noCloak, ov, style) {
+    const P = this.pose(name, f), R = Math.PI / 180, S = style || {}, C = S.pal || this.PAL, keep = [this.PAL, this.style];
+    if (ov) { const Q = this.pose(ov.name, ov.f); [1, 6, 7, 11].forEach(k => { P[k] = Q[k]; }); }
+    const J = this.rig(P);
+    this.PAL = C; this.style = style || null;
+    g.save(); g.translate(x, y); g.scale(dir * sc, sc);
+    g.translate(P[13], -Math.abs(Math.sin(P[12] * R)) * 14); g.rotate(P[12] * R);
+    g.translate(0, -Math.max(J.lA[2].y, J.lB[2].y) - 6);
+    if (S.bladeOnly) this.sword(g, J, P, f);
+    else {
+      if (!noCloak) this.drawCloak(g, this.cloakChain(J, P[10], f));
+      this.arm(g, J.aB, true); this.leg(g, J.lB, true);
+      this.seg(g, J.hip, J.sh, S.guard ? 26 : 22, C.tunic);
+      this.seg(g, J.hip, { x: J.sh.x * 0.18, y: J.sh.y * 0.18 }, S.guard ? 28 : 24, C.belt);
+      this.leg(g, J.lA, false); this.head(g, J.head, f);
+      if (S.guard) { g.fillStyle = C.armor; g.beginPath(); g.arc(J.sh.x + 1, J.sh.y + 6, 10, 0, 6.283); g.fill(); }
+      this.sword(g, J, P, f); this.arm(g, J.aA, false);
+      if (P[11] > 0.5) this.flash(g, J.aA[2]);
+    }
+    g.restore(); this.PAL = keep[0]; this.style = keep[1];
+  }
+};
+
+// Атака: взмах двумя руками (замах, удар и продолжение), остальные анимации с мечом — одной рукой
+Hero.KEYS.attack_slash.forEach((k, i) => { k[17] = [0, 0.6, 1, 1, 1, 1, 0.8, 0.3, 0, 0][i]; });
+// Присед (ТЗ-дополнение M3.1): на месте — прислушивается, в движении — крадётся
+Hero.KEYS.crouch_idle = [[20,8, 62,-112, 48,-104, 30,60, -15,45, .12,0, 0,0], [19,12, 62,-112, 48,-104, 32,60, -13,45, .08,0, 0,0],
+                         [21,6, 64,-114, 50,-106, 28,62, -17,47, .12,0, 0,0], [19,12, 62,-112, 48,-104, 32,60, -13,45, .08,0, 0,0]];
+Hero.KEYS.crouch_walk = [[22,6,77,-105,28,-105,25,55,-12,45,0.25,0,0,0],
+                         [20,6,68,-111,41,-128,31,55,-18,45,0.25,0,0,0],
+                         [18,6,56,-113,70,-140,33,55,-20,45,0.25,0,0,0],
+                         [20,6,43,-111,87,-128,31,55,-18,45,0.25,0,0,0],
+                         [22,6,28,-105,77,-105,25,55,-12,45,0.25,0,0,0],
+                         [20,6,41,-128,68,-111,19,55,-6,45,0.25,0,0,0],
+                         [18,6,70,-140,56,-113,17,55,-4,45,0.25,0,0,0],
+                         [20,6,87,-128,43,-111,19,55,-6,45,0.25,0,0,0]];
+
+// Страж (M3.2): тот же скелет, другой стиль. Меч клинком вверх; в атаке тот же взмах двумя руками, что у героя
+Hero.GUARD = { guard: true, pal: { tunic: "#4a4058", tunicB: "#352e40", pants: "#35353f", pantsB: "#2a2a32", boot: "#26262d", bootB: "#1c1c22",
+  cloak: "#4a2a30", hair: "#7d8590", skin: "#b09480", skinB: "#8c7564", belt: "#6b573d", armor: "#7d8590", visor: "#0b0b0e", blade: "#c9ced6", gold: "#8a7a50", grip: "#3a2f26" } };
+// светлая приглушённая палитра: детали стража, проступающие на слух рядом с героем
+Hero.GUARD_DIM = { guard: true, pal: { tunic: "#9a90a8", tunicB: "#7a7088", pants: "#7a7a88", pantsB: "#666674", boot: "#5a5a64", bootB: "#4a4a54",
+  cloak: "#8a6a70", hair: "#b4bcc8", skin: "#c8aa96", skinB: "#a88c7a", belt: "#a08a64", armor: "#b4bcc8", visor: "#101015", blade: "#e6ebf2", gold: "#b8a46a", grip: "#6a5a4a" } };
+Hero.BLADE = { guard: true, bladeOnly: true, pal: Hero.GUARD.pal };
+Hero.FLAT = {};
+Hero.flat = function (c) {
+  if (!this.FLAT[c]) { const pal = {}; for (const k in this.GUARD.pal) pal[k] = c; this.FLAT[c] = { guard: true, pal }; }
+  return this.FLAT[c];
+};
+Hero.KEYS.guard_idle = [[2,0, 6,-8, -5,-4, 45,75, -10,20, .08,0, 0,0, 168,1,0], [1,2, 4,-6, -3,-4, 47,73, -9,22, .05,0, 0,0, 170,1,0],
+                        [2,-2, 5,-10, -6,-6, 44,76, -11,20, .08,0, 0,0, 166,1,0], [1,2, 4,-6, -3,-4, 47,73, -9,22, .05,0, 0,0, 170,1,0]];
+Hero.KEYS.guard_walk = [[4,0, 28,-12, -26,-30, 45,75, 22,25, .2,0, 0,0, 170,1,0], [4,0, 4,-8, 10,-70, 44,74, 6,25, .2,0, 0,0, 168,1,0],
+                        [4,0, -26,-30, 28,-12, 47,76, -22,25, .2,0, 0,0, 170,1,0], [4,0, 10,-70, 4,-8, 44,74, -6,25, .2,0, 0,0, 168,1,0]];
+Hero.KEYS.guard_run = Hero.KEYS.combat_run.map(k => { const c = k.slice(); c[16] = 0; return c; });
+Hero.KEYS.guard_listen = [[3,14, 8,-6, -6,-4, 40,70, -10,20, .05,0, 0,0, 160,1,0], [3,18, 8,-6, -6,-4, 40,70, -10,20, .05,0, 0,0, 160,1,0]];
+
+// ФАЙЛ: js/dev.js — dev-меню: просмотр всех анимаций (кнопка DEV сверху справа)
+const Dev = {
+  on: false, sel: "idle", sheet: "hero", mirror: false, t0: 0, bx: 1130, by: 40, br: 32,
+  lists: { hero: Object.keys(ANIMS).filter(n => !n.startsWith("guard_")),
+           guard: ["guard_idle", "guard_walk", "guard_run", "guard_listen", "attack_slash", "hurt", "death"] },
+  get names() { return this.lists[this.sheet]; },
+  btn(i) { return { x: 10 + (i % 7) * 181, y: 556 + Math.floor(i / 7) * 56, w: 171, h: 46 }; },
+  toggle() {
+    this.on = !this.on; this.t0 = performance.now();
+    Input.stick = null; Input.axis = 0; Input.jumpDown = false; Input.ptr.clear();
+  },
+  // true = касание обработано меню
+  tap(p) {
+    if (Math.hypot(p.x - this.bx, p.y - this.by) <= this.br + 10) { this.toggle(); return true; }
+    if (!this.on) return false;
+    const n = this.names.length;
+    for (let i = 0; i <= n + 2; i++) {
+      const b = this.btn(i);
+      if (p.x < b.x || p.x > b.x + b.w || p.y < b.y || p.y > b.y + b.h) continue;
+      if (i === n + 2) { this.sheet = this.sheet === "hero" ? "guard" : "hero"; this.sel = this.names[0]; this.t0 = performance.now(); }
+      else if (i === n + 1) CONFIG.blind.geo = !CONFIG.blind.geo;
+      else if (i === n) this.mirror = !this.mirror;
+      else { this.sel = this.names[i]; this.t0 = performance.now(); }
+      break;
+    }
+    return true;
+  },
+  drawButton(g) {
+    g.globalAlpha = 0.5; g.strokeStyle = "#fff"; g.lineWidth = 3;
+    g.beginPath(); g.arc(this.bx, this.by, this.br, 0, 6.283); g.stroke();
+    g.globalAlpha = 1; g.fillStyle = "#fff"; g.font = "20px sans-serif"; g.textAlign = "center";
+    g.fillText(this.on ? "X" : "DEV", this.bx, this.by + 7);
+  },
+  draw(g, now) {
+    const a = ANIMS[this.sel], dur = Hero.duration(this.sel), d = this.mirror ? -1 : 1, st = this.sheet === "guard" ? Hero.GUARD : null;
+    const t = ((now - this.t0) / 1000) % (dur + (a.loop ? 0 : 0.5));
+    const f = Hero.frameAt(this.sel, Math.min(t, dur - 0.001), 0, false);
+    g.fillStyle = "#8fb4ff"; g.font = "24px sans-serif"; g.textAlign = "center";
+    g.fillText((this.sheet === "guard" ? "СТРАЖ: " : "") + this.sel + " | кадров " + a.frames + " | " + a.fps + " fps | кадр " + (f + 1), 640, 44);
+    Hero.draw(g, this.sel, f, 640, 400, d, 2.3, false, null, st);
+    for (let i = 0; i < a.frames; i++) {
+      const x = 70 + i * 124;
+      if (i === f) { g.strokeStyle = "#3aa0ff"; g.lineWidth = 2; g.strokeRect(x - 52, 420, 104, 112); }
+      Hero.draw(g, this.sel, i, x, 520, d, 0.8, false, null, st);
+    }
+    const n = this.names.length;
+    this.names.concat(["ЗЕРКАЛО", "ГЕОМЕТРИЯ", this.sheet === "hero" ? "→ СТРАЖ" : "→ ГЕРОЙ"]).forEach((nm, i) => {
+      const b = this.btn(i), on = nm === this.sel || (i === n && this.mirror) || (i === n + 1 && CONFIG.blind.geo);
+      g.fillStyle = on ? "#1d4d7a" : "#1a2036"; g.fillRect(b.x, b.y, b.w, b.h);
+      g.strokeStyle = "#3aa0ff"; g.lineWidth = 2; g.strokeRect(b.x, b.y, b.w, b.h);
+      g.fillStyle = "#fff"; g.font = "18px sans-serif"; g.fillText(nm, b.x + b.w / 2, b.y + 30);
+    });
+  }
+};
+
+// ФАЙЛ: js/camera.js — камера (ТЗ 6.5): сглаживание 8, мёртвая зона 40 px, упреждение 64 px, границы уровня, тряска при ударе
+const Camera = {
+  x: 0, y: 0, px: 0, py: 0, sh: 0, cur: { x: 0, y: 0 },
+  want() {
+    const K = CONFIG.camera, P = Player, lw = Level.cols * TILE, lh = Level.nrows * TILE;
+    return { x: P.x + P.dir * K.look - W / 2, y: P.y - 80 - H / 2, mx: Math.max(0, lw - W), my: Math.max(0, lh - H) };
+  },
+  snap() {
+    const t = this.want();
+    this.x = this.px = Math.max(0, Math.min(t.mx, t.x)); this.y = this.py = Math.max(0, Math.min(t.my, t.y));
+    this.sh = 0; this.cur = { x: this.x, y: this.y };
+  },
+  update(dt) {
+    const K = CONFIG.camera, t = this.want(), f = 1 - Math.exp(-K.smooth * dt);
+    let dx = t.x - this.x, dy = t.y - this.y;
+    this.px = this.x; this.py = this.y;
+    dx = Math.abs(dx) <= K.dzX ? 0 : dx - Math.sign(dx) * K.dzX;
+    dy = Math.abs(dy) <= K.dzY ? 0 : dy - Math.sign(dy) * K.dzY;
+    this.x = Math.max(0, Math.min(t.mx, this.x + dx * f)); this.y = Math.max(0, Math.min(t.my, this.y + dy * f));
+    if (this.sh > 0) this.sh -= dt;
+  },
+  kick() { if (CONFIG.camera.shake) this.sh = CONFIG.camera.shakeTime; },
+  // Положение для кадра: интерполяция между шагами физики + тряска
+  view(a) {
+    const K = CONFIG.camera, k = this.sh > 0 ? K.shakeAmp * this.sh / K.shakeTime : 0;
+    this.cur = { x: Math.round(this.px + (this.x - this.px) * a + (Math.random() - 0.5) * 2 * k),
+                 y: Math.round(this.py + (this.y - this.py) * a + (Math.random() - 0.5) * 2 * k) };
+    return this.cur;
+  }
+};
+
+// ФАЙЛ: js/main.js — GameManager: цикл 60 шагов/с, масштаб, рисование
+const g = cv.getContext("2d");
+let S = 1;
+function resize() {
+  const k = Math.min(innerWidth / W, innerHeight / H), cw = W * k, ch = H * k;
+  const dpr = Math.min(devicePixelRatio || 1, CONFIG.maxPixelRatio);
+  cv.style.width = cw + "px"; cv.style.height = ch + "px";
+  cv.style.margin = ((innerHeight - ch) / 2) + "px " + ((innerWidth - cw) / 2) + "px";
+  cv.width = Math.round(cw * dpr); cv.height = Math.round(ch * dpr);
+  S = cv.width / W;
+}
+// Уровень тёмный: тайлы еле видны, цвет появляется при проявлении, белая линия — грань, которой коснулось эхо или звук
+function drawLevel() {
+  for (const o of Level.objs) {
+    if (o.c * TILE + TILE < Camera.cur.x || o.c * TILE > Camera.cur.x + W) continue;   // за экраном не рисуем
+    const x = o.c * TILE, y = o.r * TILE, wall = o.type === "#", h = wall ? TILE : 12;
+    if (CONFIG.blind.geo) {   // подсказка геометрии — только для DEV; по умолчанию мир чёрный
+      if (wall) {
+        g.fillStyle = "#0d1124"; g.fillRect(x, y, TILE, TILE);
+        g.strokeStyle = "#161c38"; g.lineWidth = 2; g.strokeRect(x + 1, y + 1, TILE - 2, TILE - 2);
+      } else { g.fillStyle = "#12304a"; g.fillRect(x, y, TILE, h); }
+    }
+    for (let f = 0; f < 4; f++) {
+      const a = Math.max(o.edge[f], o.snd[f]);
+      if (a <= 0) continue;
+      g.globalAlpha = Math.min(1, a); g.strokeStyle = "#fff"; g.lineWidth = o.edge[f] >= o.snd[f] ? 4 : 2;
+      g.beginPath();
+      if (f === 0) { g.moveTo(x, y); g.lineTo(x + TILE, y); } else if (f === 1) { g.moveTo(x + TILE, y); g.lineTo(x + TILE, y + h); }
+      else if (f === 2) { g.moveTo(x, y + h); g.lineTo(x + TILE, y + h); } else { g.moveTo(x, y); g.lineTo(x, y + h); }
+      g.stroke();
+    }
+    g.globalAlpha = 1;
+  }
+}
+function drawPlayer(a) {
+  const p = Player, x = p.px + (p.x - p.px) * a, y = p.py + (p.y - p.py) * a;
+  g.globalAlpha = p.invuln > 0 && Math.floor(p.invuln * CONFIG.hero.blinkHz * 2) % 2 ? 0.4 : 1;   // мигание при неуязвимости
+  g.save(); g.translate(x - p.x, y - p.y); Hero.drawCloak(g, Cloak.pts); g.restore();
+  Hero.draw(g, p.anim, p.frame(), x, y, p.dir, 1, true, p.ov);
+  g.globalAlpha = 1;
+}
+function drawControls() {
+  const T = CONFIG.touch, s = Input.stick, J = T.jump;
+  g.lineWidth = 4; g.strokeStyle = "#fff"; g.fillStyle = "#fff";
+  g.globalAlpha = T.alpha * (s ? 1 : 0.4);
+  const ox = s ? s.ox : 200, oy = s ? s.oy : 560;
+  g.beginPath(); g.arc(ox, oy, T.stickR, 0, 6.283); g.stroke();
+  if (s) {
+    const dx = Math.max(-T.stickR, Math.min(T.stickR, s.x - s.ox));
+    const dy = Math.max(-T.stickR, Math.min(T.stickR, s.y - s.oy));
+    g.beginPath(); g.arc(ox + dx, oy + dy, 28, 0, 6.283); g.fill();
+  } else { g.globalAlpha = 0.3; g.font = "16px sans-serif"; g.textAlign = "center"; g.fillText("\u2193 присесть", ox, oy + 92); }
+  g.globalAlpha = Input.jumpDown ? T.alphaDown : T.alpha;
+  g.fillStyle = "#4aa3ff"; g.beginPath(); g.arc(J.x, J.y, J.d / 2, 0, 6.283); g.fill(); g.stroke();
+  g.globalAlpha = 1; g.fillStyle = "#fff"; g.font = "22px sans-serif"; g.textAlign = "center";
+  g.fillText("JUMP", J.x, J.y + 8);
+  const B = T.echo, k = EchoManager.cd > 0 ? 1 - EchoManager.cd / CONFIG.echo.cooldown : 1;
+  g.globalAlpha = Input.echoDown ? T.alphaDown : T.alpha;
+  g.fillStyle = k < 1 ? "#2a3a5a" : "#2fb8d8"; g.strokeStyle = "#fff"; g.lineWidth = 4;
+  g.beginPath(); g.arc(B.x, B.y, B.d / 2, 0, 6.283); g.fill(); g.stroke();
+  g.globalAlpha = 0.9; g.lineWidth = 5;   // кольцо перезарядки
+  g.beginPath(); g.arc(B.x, B.y, B.d / 2 + 7, -Math.PI / 2, -Math.PI / 2 + 6.283 * k); g.stroke();
+  g.globalAlpha = 1; g.fillStyle = "#fff"; g.font = "20px sans-serif"; g.fillText("ECHO", B.x, B.y + 7);
+  const R = T.throw;   // кнопка КАМЕНЬ: тап — бросок, тянуть — прицел
+  g.globalAlpha = Input.aim ? T.alphaDown : (Stones.n > 0 ? T.alpha : 0.2);
+  g.fillStyle = "#7a7f8f"; g.strokeStyle = "#fff"; g.lineWidth = 4;
+  g.beginPath(); g.arc(R.x, R.y, R.d / 2, 0, 6.283); g.fill(); g.stroke();
+  g.globalAlpha = 1; g.fillStyle = "#fff"; g.font = "17px sans-serif"; g.fillText("КАМЕНЬ", R.x, R.y - 2);
+  g.font = "20px sans-serif"; g.fillText("\u00d7" + Stones.n, R.x, R.y + 20);
+}
+// Сердца: жизни героя (ТЗ 12.1)
+function drawHud() {
+  for (let i = 0; i < CONFIG.hero.hp; i++) {
+    const x = 36 + i * 44, y = 40, on = i < Player.hp;
+    g.beginPath(); g.moveTo(x, y + 12); g.bezierCurveTo(x - 24, y - 6, x - 8, y - 22, x, y - 8);
+    g.bezierCurveTo(x + 8, y - 22, x + 24, y - 6, x, y + 12); g.closePath();
+    if (on) { g.fillStyle = "#ff4a5a"; g.fill(); }
+    g.strokeStyle = "#fff"; g.globalAlpha = on ? 1 : 0.4; g.lineWidth = 3; g.stroke(); g.globalAlpha = 1;
+  }
+}
+function respawn() { Player.reset(); Enemies.reset(); Stones.reset(); }
+let last = performance.now(), acc = 0, fps = 60;
+function frame(t) {
+  const dt = Math.max(0, Math.min((t - last) / 1000, CONFIG.maxFrame));
+  last = t; acc += dt;
+  if (dt > 0) fps = fps * 0.95 + (1 / dt) * 0.05;
+  if (Dev.on) acc = 0;
+  while (acc >= CONFIG.STEP) {
+    Player.update(CONFIG.STEP); Enemies.collide(); Stones.update(CONFIG.STEP); Enemies.update(CONFIG.STEP); EchoManager.update(CONFIG.STEP); Marks.update(CONFIG.STEP); Camera.update(CONFIG.STEP);
+    acc -= CONFIG.STEP;
+  }
+  g.setTransform(S, 0, 0, S, 0, 0);
+  g.fillStyle = "#06080f"; g.fillRect(0, 0, W, H);
+  if (Dev.on) Dev.draw(g, performance.now());
+  else {
+    const cam = Camera.view(acc / CONFIG.STEP);
+    g.save(); g.translate(-cam.x, -cam.y);   // мир двигается камерой, кнопки и сердца — нет
+    Back.draw(g); drawLevel(); Enemies.draw(g); drawPlayer(acc / CONFIG.STEP); EchoManager.draw(g); Stones.draw(g); Marks.draw(g);
+    g.restore();
+    drawControls(); drawHud();
+    g.fillStyle = "#8fb4ff"; g.font = "18px sans-serif"; g.textAlign = "left";
+    g.fillText("M4.0 | FPS " + fps.toFixed(0) + " | " + Player.state + " | враг " + (Enemies.list[0] ? Enemies.list[0].state : "-") + " | слух \u00d7" + Player.hearK.toFixed(1), 16, 84);
+  }
+  Dev.drawButton(g);
+  requestAnimationFrame(frame);
+}
+addEventListener("pointerdown", e => Input.onDown(e));
+addEventListener("pointermove", e => Input.onMove(e));
+addEventListener("pointerup", e => Input.onUp(e));
+addEventListener("pointercancel", e => Input.onUp(e));
+addEventListener("contextmenu", e => e.preventDefault());
+addEventListener("resize", resize);
+resize(); Level.init(); Player.reset(); Marks.init(); EchoManager.init(); Back.init(); Enemies.add(2300, 704, 2060, 2620); Enemies.add(1400, 448, 1190, 1620); Stones.reset(); requestAnimationFrame(frame);   // страж №2 ходит по балкону
+</script>
+</body>
+</html>
