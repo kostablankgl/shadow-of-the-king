@@ -1,14 +1,15 @@
 extends Node3D
 
-const RAY_COUNT := 1440
-const RAYS_PER_FRAME := 480
+const MAP_WIDTH := 256
+const MAP_HEIGHT := 128
+const RAY_COUNT := MAP_WIDTH * MAP_HEIGHT
+const RAYS_PER_FRAME := 4096
 const MAX_DISTANCE := 18.0
 const WAVE_SPEED := 20.0
-const WAVE_WIDTH := 3.0
+const WAVE_WIDTH := 1.2
 const FRESH_TIME := 2.0
 const MEMORY_TIME := 18.0
-const MAP_WIDTH := 128
-const MAP_HEIGHT := 64
+const CANE_RADIUS := 0.5
 
 var _map_image: Image
 var _map_texture: ImageTexture
@@ -41,7 +42,8 @@ func setup_reveal(material: ShaderMaterial, player: Node3D) -> void:
 	_reveal_material.set_shader_parameter("wave_width", WAVE_WIDTH)
 	_reveal_material.set_shader_parameter("fresh_time", FRESH_TIME)
 	_reveal_material.set_shader_parameter("memory_time", MEMORY_TIME)
-	_reveal_material.set_shader_parameter("player_position", _player_position())
+	_reveal_material.set_shader_parameter("cane_radius", CANE_RADIUS)
+	_reveal_material.set_shader_parameter("player_position", _feet_position())
 
 func emit_echo(origin: Vector3) -> void:
 	if _reveal_material == null or _building:
@@ -56,7 +58,7 @@ func emit_echo(origin: Vector3) -> void:
 func _process(_delta: float) -> void:
 	if _reveal_material == null:
 		return
-	_reveal_material.set_shader_parameter("player_position", _player_position())
+	_reveal_material.set_shader_parameter("player_position", _feet_position())
 	if _building:
 		_cast_batch()
 	if _active:
@@ -66,48 +68,34 @@ func _process(_delta: float) -> void:
 			_active = false
 			_reveal_material.set_shader_parameter("echo_active", false)
 
-func _player_position() -> Vector3:
+func _feet_position() -> Vector3:
 	if _player == null or not is_instance_valid(_player):
 		return Vector3.ZERO
 	return _player.global_position + Vector3(0.0, -0.9, 0.0)
 
 func _cast_batch() -> void:
 	var space := get_world_3d().direct_space_state
-	var golden := PI * (3.0 - sqrt(5.0))
 	var end := mini(_ray_index + RAYS_PER_FRAME, RAY_COUNT)
 	while _ray_index < end:
 		var i := _ray_index
-		var y := 1.0 - (float(i) / float(RAY_COUNT - 1)) * 2.0
-		var radius := sqrt(maxf(0.0, 1.0 - y * y))
-		var theta := golden * float(i)
-		var dir := Vector3(cos(theta) * radius, y, sin(theta) * radius).normalized()
+		var x := i % MAP_WIDTH
+		var y := i / MAP_WIDTH
+		var u := (float(x) + 0.5) / float(MAP_WIDTH)
+		var v := (float(y) + 0.5) / float(MAP_HEIGHT)
+		var theta := (u - 0.5) * TAU
+		var phi := v * PI
+		var dir := Vector3(sin(phi) * cos(theta), cos(phi), sin(phi) * sin(theta))
 		var query := PhysicsRayQueryParameters3D.create(_echo_origin, _echo_origin + dir * MAX_DISTANCE, 1)
 		query.collide_with_areas = false
 		query.collide_with_bodies = true
 		var result := space.intersect_ray(query)
-		if not result.is_empty():
-			_splat_hit(result)
+		if result.is_empty():
+			_buffer[i] = 1.0
+		else:
+			_buffer[i] = clampf(_echo_origin.distance_to(result.position) / MAX_DISTANCE, 0.0, 1.0)
 		_ray_index += 1
 	if _ray_index >= RAY_COUNT:
 		_finish_map()
-
-func _splat_hit(result: Dictionary) -> void:
-	var hit_pos: Vector3 = result.position
-	var to_hit := hit_pos - _echo_origin
-	var hit_dir := to_hit.normalized()
-	var dist := to_hit.length()
-	var u := atan2(hit_dir.z, hit_dir.x) / TAU + 0.5
-	var v := acos(clampf(hit_dir.y, -1.0, 1.0)) / PI
-	var px := int(floor(u * MAP_WIDTH)) % MAP_WIDTH
-	var py := clampi(int(floor(v * MAP_HEIGHT)), 0, MAP_HEIGHT - 1)
-	var value := clampf(dist / MAX_DISTANCE, 0.0, 1.0)
-	for dx in [-1, 0, 1]:
-		for dy in [-1, 0, 1]:
-			var sx: int = (px + int(dx) + MAP_WIDTH) % MAP_WIDTH
-			var sy: int = clampi(py + int(dy), 0, MAP_HEIGHT - 1)
-			var idx: int = sy * MAP_WIDTH + sx
-			if value < _buffer[idx]:
-				_buffer[idx] = value
 
 func _finish_map() -> void:
 	for y in MAP_HEIGHT:

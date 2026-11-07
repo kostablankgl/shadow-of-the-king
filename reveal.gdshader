@@ -2,7 +2,7 @@ shader_type spatial;
 render_mode unshaded, cull_back, depth_draw_opaque;
 
 uniform vec3 player_position = vec3(0.0);
-uniform float cane_radius = 3.0;
+uniform float cane_radius = 0.5;
 uniform float cane_strength = 0.8;
 uniform vec4 cane_color : source_color = vec4(0.55, 0.65, 0.78, 1.0);
 
@@ -11,11 +11,11 @@ uniform vec4 memory_color : source_color = vec4(0.42, 0.36, 1.0, 1.0);
 uniform vec3 echo_origin = vec3(0.0);
 uniform float echo_age = -100.0;
 uniform float wave_speed = 20.0;
-uniform float wave_width = 3.0;
+uniform float wave_width = 1.2;
 uniform float fresh_time = 2.0;
 uniform float memory_time = 18.0;
 uniform float max_distance = 18.0;
-uniform sampler2D visibility_map : filter_linear, repeat_enable;
+uniform sampler2D visibility_map : filter_nearest, repeat_enable;
 uniform bool echo_active = false;
 
 varying vec3 world_pos;

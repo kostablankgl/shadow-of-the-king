@@ -11,6 +11,7 @@ extends CharacterBody3D
 @export var echo_cooldown := 2.0
 
 @onready var visual: Node3D = $Visual
+@onready var head: Node3D = $Visual/Head
 @onready var camera_rig: Node3D = $CameraRig
 
 var yaw := 0.0
@@ -99,5 +100,5 @@ func _try_echo() -> void:
 	if _echo_system == null or not is_instance_valid(_echo_system):
 		_echo_system = get_tree().get_first_node_in_group("echo_system")
 	if _echo_system:
-		_echo_system.emit_echo(global_position + Vector3(0.0, 0.7, 0.0))
+		_echo_system.emit_echo(head.global_position)
 		_echo_timer = echo_cooldown
