@@ -14,3 +14,4 @@ juego-*.x86_64
 juego-*.exe
 juego-*.pck
 web/
+build/
