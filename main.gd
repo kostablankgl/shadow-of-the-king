@@ -3,11 +3,12 @@ extends Node3D
 const REVEAL_SHADER := preload("res://reveal.gdshader")
 
 @onready var echo_system = $EchoSystem
+@onready var player = $Player
 
 func _ready() -> void:
 	var material := ShaderMaterial.new()
 	material.shader = REVEAL_SHADER
-	echo_system.setup_reveal(material)
+	echo_system.setup_reveal(material, player)
 	_build_room(material)
 
 func _build_room(material: Material) -> void:
@@ -26,6 +27,7 @@ func _build_room(material: Material) -> void:
 	_add_box(room, Vector3(6, 2, 2), Vector3(2, 4, 2), material)
 	_add_box(room, Vector3(-6, 0.6, 4), Vector3(4, 1.2, 2), material)
 	_add_box(room, Vector3(0, 0.6, -7), Vector3(6, 1.2, 2), material)
+	_add_box(room, Vector3(0, 0.15, 3.5), Vector3(2, 0.3, 1), material)
 
 	for x in [-8.0, 8.0]:
 		for z in [-8.0, 8.0]:

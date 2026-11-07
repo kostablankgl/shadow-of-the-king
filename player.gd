@@ -8,7 +8,7 @@ extends CharacterBody3D
 @export var jump_velocity := 6.2
 @export var gravity := 20.0
 @export var touch_sensitivity := 0.006
-@export var echo_cooldown := 1.1
+@export var echo_cooldown := 2.0
 
 @onready var visual: Node3D = $Visual
 @onready var camera_rig: Node3D = $CameraRig
