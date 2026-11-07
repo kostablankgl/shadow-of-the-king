@@ -1,8 +1,11 @@
 shader_type spatial;
 render_mode unshaded, cull_back, depth_draw_opaque;
 
+#include "res://fresnel.gdshaderinc"
+
 uniform vec3 player_position = vec3(0.0);
-uniform float cane_radius = 0.5;
+uniform vec3 cane_position = vec3(0.0);
+uniform float cane_radius = 1.0;
 uniform float cane_strength = 0.8;
 uniform vec4 cane_color : source_color = vec4(0.55, 0.65, 0.78, 1.0);
 
@@ -15,7 +18,7 @@ uniform float wave_width = 1.2;
 uniform float fresh_time = 2.0;
 uniform float memory_time = 18.0;
 uniform float max_distance = 18.0;
-uniform sampler2D visibility_map : filter_nearest, repeat_enable;
+uniform sampler2D visibility_map : filter_linear, repeat_enable;
 uniform bool echo_active = false;
 
 varying vec3 world_pos;
@@ -28,16 +31,14 @@ void vertex() {
 
 void fragment() {
 	vec3 n = normalize(world_normal);
-	vec3 view_dir = normalize(CAMERA_POSITION_WORLD - world_pos);
-	float facing = abs(dot(n, view_dir));
-	float fresnel = pow(1.0 - facing, 1.5);
+	float fresnel = fresnel_rim(n, world_pos, player_position, 2.0);
 	float edge = smoothstep(0.12, 0.55, length(fwidth(n)));
-	float contour = clamp(0.15 + 0.55 * fresnel + 0.7 * edge, 0.0, 1.3);
-	float fresh_contour = clamp(0.45 + 0.55 * fresnel + 0.5 * edge, 0.0, 1.3);
-	float cane_contour = 0.35 + 0.65 * fresnel;
+	float contour = clamp(0.10 + 0.85 * fresnel + 0.9 * edge, 0.0, 1.5);
+	float fresh_contour = clamp(0.25 + 0.75 * fresnel + 0.7 * edge, 0.0, 1.5);
+	float cane_contour = 0.25 + 0.75 * fresnel;
 
-	float dist_player = length(world_pos - player_position);
-	float cane = (1.0 - smoothstep(0.0, cane_radius, dist_player)) * cane_strength;
+	float dist_cane = length(world_pos - cane_position);
+	float cane = (1.0 - smoothstep(0.0, cane_radius, dist_cane)) * cane_strength;
 	vec3 col = cane_color.rgb * cane * cane_contour;
 
 	if (echo_active) {

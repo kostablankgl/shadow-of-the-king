@@ -9,7 +9,7 @@ const WAVE_SPEED := 20.0
 const WAVE_WIDTH := 1.2
 const FRESH_TIME := 2.0
 const MEMORY_TIME := 18.0
-const CANE_RADIUS := 0.5
+const CANE_RADIUS := 1.0
 
 var _map_image: Image
 var _map_texture: ImageTexture
@@ -43,7 +43,8 @@ func setup_reveal(material: ShaderMaterial, player: Node3D) -> void:
 	_reveal_material.set_shader_parameter("fresh_time", FRESH_TIME)
 	_reveal_material.set_shader_parameter("memory_time", MEMORY_TIME)
 	_reveal_material.set_shader_parameter("cane_radius", CANE_RADIUS)
-	_reveal_material.set_shader_parameter("player_position", _feet_position())
+	_reveal_material.set_shader_parameter("player_position", _head_position())
+	_reveal_material.set_shader_parameter("cane_position", _feet_position())
 
 func emit_echo(origin: Vector3) -> void:
 	if _reveal_material == null or _building:
@@ -58,7 +59,8 @@ func emit_echo(origin: Vector3) -> void:
 func _process(_delta: float) -> void:
 	if _reveal_material == null:
 		return
-	_reveal_material.set_shader_parameter("player_position", _feet_position())
+	_reveal_material.set_shader_parameter("player_position", _head_position())
+	_reveal_material.set_shader_parameter("cane_position", _feet_position())
 	if _building:
 		_cast_batch()
 	if _active:
@@ -72,6 +74,14 @@ func _feet_position() -> Vector3:
 	if _player == null or not is_instance_valid(_player):
 		return Vector3.ZERO
 	return _player.global_position + Vector3(0.0, -0.9, 0.0)
+
+func _head_position() -> Vector3:
+	if _player == null or not is_instance_valid(_player):
+		return Vector3.ZERO
+	var head := _player.get_node_or_null("Visual/Head") as Node3D
+	if head != null:
+		return head.global_position
+	return _player.global_position + Vector3(0.0, 1.0, 0.0)
 
 func _cast_batch() -> void:
 	var space := get_world_3d().direct_space_state
