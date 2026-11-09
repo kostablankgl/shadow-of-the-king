@@ -11,7 +11,7 @@ extends CharacterBody3D
 @export var echo_cooldown := 2.0
 
 @onready var visual: Node3D = $Visual
-@onready var head: Node3D = $Visual/Head
+@onready var anim: Variant = $Visual/PlayerAnim
 @onready var camera_rig: Node3D = $CameraRig
 
 var yaw := 0.0
@@ -92,13 +92,19 @@ func _physics_process(delta: float) -> void:
 		var target_yaw := atan2(-direction.x, -direction.z)
 		visual.rotation.y = lerp_angle(visual.rotation.y, target_yaw, 12.0 * delta)
 
-	var target_height := 0.72 if crouch else 1.0
-	visual.scale.y = lerpf(visual.scale.y, target_height, 10.0 * delta)
+	var horizontal_speed := Vector2(velocity.x, velocity.z).length()
+	if anim:
+		anim.update_motion(horizontal_speed, is_on_floor(), crouch, velocity.y, delta)
 	camera_rig.position.y = lerpf(camera_rig.position.y, 0.3 if crouch else 0.5, 10.0 * delta)
 
 func _try_echo() -> void:
 	if _echo_system == null or not is_instance_valid(_echo_system):
 		_echo_system = get_tree().get_first_node_in_group("echo_system")
 	if _echo_system:
-		_echo_system.emit_echo(head.global_position)
+		var origin := visual.global_position + Vector3(0.0, 0.72, 0.0)
+		if anim:
+			origin = anim.get_head_position()
+		_echo_system.emit_echo(origin)
+		if anim:
+			anim.play_cast()
 		_echo_timer = echo_cooldown

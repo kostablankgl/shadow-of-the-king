@@ -78,10 +78,13 @@ func _feet_position() -> Vector3:
 func _head_position() -> Vector3:
 	if _player == null or not is_instance_valid(_player):
 		return Vector3.ZERO
-	var head := _player.get_node_or_null("Visual/Head") as Node3D
-	if head != null:
-		return head.global_position
-	return _player.global_position + Vector3(0.0, 1.0, 0.0)
+	var anim := _player.get_node_or_null("Visual/PlayerAnim")
+	if anim != null and anim.has_method("get_head_position"):
+		return anim.get_head_position()
+	var marker := _player.get_node_or_null("Visual/Model/Root/Hips/Torso/Head/HeadMarker") as Node3D
+	if marker != null:
+		return marker.global_position
+	return _player.global_position + Vector3(0.0, 0.72, 0.0)
 
 func _cast_batch() -> void:
 	var space := get_world_3d().direct_space_state
