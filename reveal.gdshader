@@ -32,9 +32,9 @@ void vertex() {
 void fragment() {
 	vec3 n = normalize(world_normal);
 	float fresnel = fresnel_rim(n, world_pos, player_position, 2.0);
-	float edge = smoothstep(0.12, 0.55, length(fwidth(n)));
+	float edge = smoothstep(0.08, 0.35, length(fwidth(n)));
 	float contour = clamp(0.10 + 0.85 * fresnel + 0.9 * edge, 0.0, 1.5);
-	float fresh_contour = clamp(0.25 + 0.75 * fresnel + 0.7 * edge, 0.0, 1.5);
+	float fresh_contour = clamp(0.18 + 0.82 * fresnel + 0.7 * edge, 0.0, 1.5);
 	float cane_contour = 0.25 + 0.75 * fresnel;
 
 	float dist_cane = length(world_pos - cane_position);
@@ -66,6 +66,7 @@ void fragment() {
 			float band = exp(-pow(front / wave_width, 2.0));
 			col += echo_col * brightness;
 			col += fresh_color.rgb * band * 1.2;
+			col += fresh_color.rgb * edge * 1.6 * clamp(fresh_w + memory_w, 0.0, 1.0);
 		}
 	}
 
