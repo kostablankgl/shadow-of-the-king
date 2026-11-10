@@ -29,7 +29,7 @@ shadow_enabled = false
 script = ExtResource("4_echo")
 
 [node name="Player" parent="." instance=ExtResource("2_player")]
-position = Vector3(0, 1.2, 6)
+position = Vector3(0, 0.95, 12)
 
 [node name="UI" type="CanvasLayer" parent="."]
 

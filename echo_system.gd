@@ -81,7 +81,7 @@ func _head_position() -> Vector3:
 	var anim := _player.get_node_or_null("Visual/PlayerAnim")
 	if anim != null and anim.has_method("get_head_position"):
 		return anim.get_head_position()
-	var marker := _player.get_node_or_null("Visual/Model/Root/Hips/Torso/Head/HeadMarker") as Node3D
+	var marker := _player.get_node_or_null("Visual/Model/Root/Hips/Torso/Neck/Head/HeadMarker") as Node3D
 	if marker != null:
 		return marker.global_position
 	return _player.global_position + Vector3(0.0, 0.72, 0.0)

@@ -23,16 +23,27 @@ uniform bool echo_active = false;
 
 varying vec3 world_pos;
 varying vec3 world_normal;
+varying vec3 box_pos;
+varying vec3 axis_scale;
 
 void vertex() {
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	world_normal = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
+	box_pos = VERTEX;
+	axis_scale = vec3(
+		length(MODEL_MATRIX[0].xyz),
+		length(MODEL_MATRIX[1].xyz),
+		length(MODEL_MATRIX[2].xyz)
+	);
 }
 
 void fragment() {
 	vec3 n = normalize(world_normal);
 	float fresnel = fresnel_rim(n, world_pos, player_position, 2.0);
-	float edge = smoothstep(0.08, 0.35, length(fwidth(n)));
+	vec3 box_dist = (vec3(0.5) - abs(box_pos)) * axis_scale;
+	float edge_dist = box_dist.x + box_dist.y + box_dist.z - max(box_dist.x, max(box_dist.y, box_dist.z));
+	float edge_w = clamp(fwidth(edge_dist) * 1.25, 0.012, 0.08);
+	float edge = 1.0 - smoothstep(edge_w, edge_w * 3.0, edge_dist);
 	float contour = clamp(0.10 + 0.85 * fresnel + 0.9 * edge, 0.0, 1.5);
 	float fresh_contour = clamp(0.18 + 0.82 * fresnel + 0.7 * edge, 0.0, 1.5);
 	float cane_contour = 0.25 + 0.75 * fresnel;
@@ -66,7 +77,7 @@ void fragment() {
 			float band = exp(-pow(front / wave_width, 2.0));
 			col += echo_col * brightness;
 			col += fresh_color.rgb * band * 1.2;
-			col += fresh_color.rgb * edge * 1.6 * clamp(fresh_w + memory_w, 0.0, 1.0);
+			col += echo_col * edge * 1.6 * clamp(fresh_w + memory_w, 0.0, 1.0);
 		}
 	}
 

@@ -6,6 +6,7 @@ GLB = PROJECT + "/assets/player.glb"
 PREVIEW = PROJECT + "/assets/player_preview.png"
 WALK_PREVIEW = PROJECT + "/assets/player_walk_preview.png"
 CAST_PREVIEW = PROJECT + "/assets/player_cast_preview.png"
+CROUCH_PREVIEW = PROJECT + "/assets/player_crouch_preview.png"
 
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete(use_global=False)
@@ -53,9 +54,7 @@ leather = make_mat("Leather", (0.12, 0.08, 0.05, 1), 0.0, 0.9)
 skin = make_mat("Skin", (0.55, 0.43, 0.34, 1), 0.0, 0.7)
 blindfold = make_mat("Blindfold", (0.55, 0.65, 0.62, 1), 0.0, 0.8, (0.2, 0.7, 0.8, 1), 1.2)
 hair = make_mat("Hair", (0.04, 0.035, 0.03, 1), 0.0, 1.0)
-metal = make_mat("Metal", (0.40, 0.42, 0.45, 1), 0.9, 0.3)
 gold = make_mat("Gold", (0.70, 0.50, 0.15, 1), 0.9, 0.25, (0.4, 0.25, 0.05, 1), 0.3)
-wood = make_mat("Wood", (0.18, 0.12, 0.07, 1), 0.0, 0.9)
 
 parts = []
 
@@ -144,7 +143,7 @@ for side in (-1, 1):
     add_cyl("Bracer_%d" % side, 0.06, 0.14, (side * 0.34, -0.02, -0.11), armor)
     add_box("ShoulderPad_%d" % side, (0.16, 0.20, 0.14), (side * 0.27, 0.0, 0.50), armor)
 
-add_cyl("Neck", 0.07, 0.12, (0.0, 0.0, 0.56), skin)
+add_cyl("NeckCyl", 0.07, 0.12, (0.0, 0.0, 0.56), skin)
 add_sphere("HeadSphere", 0.17, (0.0, -0.04, 0.72), skin, 16, 12)
 add_box("Nose", (0.05, 0.05, 0.06), (0.0, -0.20, 0.69), skin)
 add_torus("BlindfoldBand", 0.172, 0.026, (0.0, -0.04, 0.75), blindfold)
@@ -168,14 +167,6 @@ for i, x in enumerate((-0.14, 0.0, 0.14)):
 for side in (-1, 1):
     add_box("Pouch_%d" % side, (0.11, 0.08, 0.12), (side * 0.17, -0.11, -0.08), leather)
 
-add_cyl("StaffShaft", 0.025, 1.45, (0.42, -0.04, -0.175), wood)
-add_sphere("StaffKnob", 0.06, (0.42, -0.04, 0.57), gold, 12, 8)
-add_sphere("StaffBell", 0.035, (0.42, -0.04, 0.64), gold, 10, 8)
-
-add_box("SwordBlade", (0.05, 0.02, 0.65), (-0.20, 0.20, 0.25), metal)
-add_box("SwordGuard", (0.14, 0.04, 0.04), (-0.20, 0.20, 0.57), gold)
-add_sphere("SwordPommel", 0.035, (-0.20, 0.20, 0.62), gold, 10, 8)
-
 add_sphere("BeltBell1", 0.03, (0.21, -0.16, -0.12), gold, 8, 6)
 add_sphere("BeltBell2", 0.025, (-0.21, -0.16, -0.12), gold, 8, 6)
 
@@ -198,27 +189,32 @@ def make_empty(name, world_pos, parent=None):
 root = make_empty("Root", (0.0, 0.0, 0.0))
 hips = make_empty("Hips", (0.0, 0.0, -0.12), root)
 torso = make_empty("Torso", (0.0, 0.0, 0.02), hips)
-head = make_empty("Head", (0.0, 0.0, 0.56), torso)
+neck = make_empty("Neck", (0.0, 0.0, 0.56), torso)
+cape_rig = make_empty("CapeRig", (0.0, 0.16, 0.52), torso)
+head = make_empty("Head", (0.0, 0.0, 0.56), neck)
 arm_l = make_empty("ArmL", (-0.32, 0.0, 0.47), torso)
 arm_r = make_empty("ArmR", (0.32, 0.0, 0.47), torso)
 leg_l = make_empty("LegL", (-0.13, 0.0, -0.15), hips)
 leg_r = make_empty("LegR", (0.13, 0.0, -0.15), hips)
 shin_l = make_empty("ShinL", (-0.13, 0.0, -0.43), leg_l)
 shin_r = make_empty("ShinR", (0.13, 0.0, -0.43), leg_r)
-staff = make_empty("Staff", (0.42, -0.04, 0.0), arm_r)
+foot_l = make_empty("FootL", (-0.13, 0.0, -0.75), shin_l)
+foot_r = make_empty("FootR", (0.13, 0.0, -0.75), shin_r)
 head_marker = make_empty("HeadMarker", (0.0, 0.0, 0.72), head)
 
 GROUPS = [
     ("Hips", ["Pelvis", "Belt", "Buckle", "Tabard", "TabardTrim", "Pouch_-1", "Pouch_1", "BeltBell1", "BeltBell2"], hips),
-    ("Torso", ["TorsoCyl", "ChestPlate", "Shoulders", "Collar", "Cape", "CapeCollar", "CapeSide_-1", "CapeSide_1", "Clasp", "CapeTatter_0", "CapeTatter_1", "CapeTatter_2", "SwordBlade", "SwordGuard", "SwordPommel"], torso),
-    ("Head", ["Neck", "HeadSphere", "Nose", "BlindfoldBand", "BlindfoldPad", "Beard", "HoodBack", "HoodTop", "HoodSide_-1", "HoodSide_1", "HoodBrim"], head),
+    ("Torso", ["TorsoCyl", "ChestPlate", "Shoulders", "Collar", "CapeCollar", "Clasp"], torso),
+    ("CapeRig", ["Cape", "CapeSide_-1", "CapeSide_1", "CapeTatter_0", "CapeTatter_1", "CapeTatter_2"], cape_rig),
+    ("Head", ["NeckCyl", "HeadSphere", "Nose", "BlindfoldBand", "BlindfoldPad", "Beard", "HoodBack", "HoodTop", "HoodSide_-1", "HoodSide_1", "HoodBrim"], head),
     ("ArmL", ["UpperArm_-1", "Forearm_-1", "Hand_-1", "Bracer_-1", "ShoulderPad_-1"], arm_l),
     ("ArmR", ["UpperArm_1", "Forearm_1", "Hand_1", "Bracer_1", "ShoulderPad_1"], arm_r),
     ("LegL", ["Thigh_-1"], leg_l),
     ("LegR", ["Thigh_1"], leg_r),
-    ("ShinL", ["Calf_-1", "Boot_-1", "Knee_-1", "ShinArmor_-1"], shin_l),
-    ("ShinR", ["Calf_1", "Boot_1", "Knee_1", "ShinArmor_1"], shin_r),
-    ("Staff", ["StaffShaft", "StaffKnob", "StaffBell"], staff),
+    ("ShinL", ["Calf_-1", "Knee_-1", "ShinArmor_-1"], shin_l),
+    ("ShinR", ["Calf_1", "Knee_1", "ShinArmor_1"], shin_r),
+    ("FootL", ["Boot_-1"], foot_l),
+    ("FootR", ["Boot_1"], foot_r),
 ]
 
 grouped = set()
@@ -312,7 +308,7 @@ rim.data.shadow_soft_size = 2.0
 
 
 def reset_pose():
-    for empty in (hips, torso, head, arm_l, arm_r, leg_l, leg_r, shin_l, shin_r, staff):
+    for empty in (hips, torso, neck, head, arm_l, arm_r, leg_l, leg_r, shin_l, shin_r, foot_l, foot_r, cape_rig):
         empty.rotation_euler = (0.0, 0.0, 0.0)
     hips.location.z = -0.12
 
@@ -344,9 +340,29 @@ head.rotation_euler.z = 0.06
 scene.render.filepath = CAST_PREVIEW
 bpy.ops.render.render(write_still=True)
 
+reset_pose()
+hips.location.z = -0.41
+torso.rotation_euler.x = 0.16
+neck.rotation_euler.x = 0.34
+head.rotation_euler.x = -0.30
+cape_rig.rotation_euler.x = 0.25
+leg_l.rotation_euler.x = -1.15
+leg_r.rotation_euler.x = -1.15
+shin_l.rotation_euler.x = 2.08
+shin_r.rotation_euler.x = 2.08
+foot_l.rotation_euler.x = -0.93
+foot_r.rotation_euler.x = -0.93
+arm_l.rotation_euler.x = -0.28
+arm_r.rotation_euler.x = -0.24
+arm_l.rotation_euler.y = 0.18
+arm_r.rotation_euler.y = -0.18
+scene.render.filepath = CROUCH_PREVIEW
+bpy.ops.render.render(write_still=True)
+
 bpy.ops.wm.save_as_mainfile(filepath="/tmp/opencode/player_rig.blend")
 
 print("EXPORTED", GLB)
 print("PREVIEW", PREVIEW)
 print("WALK_PREVIEW", WALK_PREVIEW)
 print("CAST_PREVIEW", CAST_PREVIEW)
+print("CROUCH_PREVIEW", CROUCH_PREVIEW)
